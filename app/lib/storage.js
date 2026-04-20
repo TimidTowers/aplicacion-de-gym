@@ -44,6 +44,16 @@ export function emptyProfile(name, routineId) {
     streak: 0,
     totalCompleted: 0,
     history: [],
+    // Rutinas personalizadas creadas/duplicadas por el usuario
+    customRoutines: {},
+    // Datos corporales — todo opcional
+    body: {
+      height: null,     // cm
+      age: null,        // años
+      sex: null,        // 'male' | 'female'
+      activity: 1.55,   // factor actividad (por defecto: moderado)
+      measurements: [], // [{ week, date, weight, bodyFat? }]
+    },
   };
 }
 

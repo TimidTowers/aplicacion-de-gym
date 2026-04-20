@@ -5,16 +5,24 @@ import {
   Check, Trophy, Flame, Zap, Target, TrendingUp, RotateCcw, ChevronDown, ChevronUp,
   Info, Timer, Play, Pause, X, Plus, Minus, Dumbbell, Home, BarChart3, User,
   LogOut, Download, Upload, ArrowRight, Calendar, Activity, Settings, Sparkles,
-  Lightbulb,
+  Lightbulb, CalendarPlus, Edit3, Copy, Trash2, Scale, Ruler, Heart, Flame as FlameIcon,
+  GripVertical, Save, ChevronRight, Circle,
 } from 'lucide-react';
 import { ROUTINES, ROUTINE_LIST } from './data/routines';
 import { loadRoot, saveRoot, emptyProfile } from './lib/storage';
+import {
+  bmi, bmiCategory, bodyFatPercent, bodyFatCategory, bmr, maintenance,
+  idealWeight, leanMass, ffmi, ACTIVITY_LEVELS,
+} from './lib/bodyMetrics';
 
 // Mapeo nombre → componente icon
 const ICONS = { Zap, Flame, Target, Dumbbell, Trophy, Activity };
 const IconOf = (name) => ICONS[name] || Dumbbell;
 
 const exerciseId = (dayKey, i) => `${dayKey}-${i}`;
+
+// Límite superior del descanso — 5 minutos
+const REST_MAX = 300;
 
 export default function App() {
   const [mounted, setMounted] = useState(false);
@@ -29,6 +37,11 @@ export default function App() {
   const [timerTotal, setTimerTotal] = useState(0);
   const timerRef = useRef(null);
 
+  // Modales / editores
+  const [bodyEditorOpen, setBodyEditorOpen] = useState(false);
+  const [measurementModalOpen, setMeasurementModalOpen] = useState(false);
+  const [routineEditor, setRoutineEditor] = useState(null); // { mode: 'create'|'edit'|'duplicate', routine? }
+
   // Carga inicial
   useEffect(() => {
     setRoot(loadRoot());
@@ -38,7 +51,19 @@ export default function App() {
   const persist = (next) => { setRoot(next); saveRoot(next); };
 
   const profile = root.currentProfile ? root.profiles[root.currentProfile] : null;
-  const routine = profile ? ROUTINES[profile.routineId] : null;
+
+  // Helper: busca la rutina en presets o en las custom del perfil
+  const resolveRoutine = (p, id) => {
+    if (!p) return null;
+    if (ROUTINES[id]) return ROUTINES[id];
+    return p.customRoutines?.[id] || null;
+  };
+  const routine = profile ? resolveRoutine(profile, profile.routineId) : null;
+
+  // Lista combinada de rutinas disponibles para este perfil (presets + custom)
+  const allRoutines = profile
+    ? [...ROUTINE_LIST, ...Object.values(profile.customRoutines || {})]
+    : ROUTINE_LIST;
 
   // Timer
   useEffect(() => {
@@ -46,28 +71,40 @@ export default function App() {
       timerRef.current = setTimeout(() => setTimerSeconds(s => s - 1), 1000);
     } else if (timerSeconds === 0 && timerRunning) {
       setTimerRunning(false);
-      if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      // Patrón de vibración fuerte: 3 pulsos largos
+      if (typeof navigator !== 'undefined' && navigator.vibrate) {
+        navigator.vibrate([300, 120, 300, 120, 300]);
+      }
       playBeep();
     }
     return () => clearTimeout(timerRef.current);
   }, [timerRunning, timerSeconds]);
 
+  // Beep final compuesto: 3 pitidos ascendentes (más reconocible)
   const playBeep = () => {
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.frequency.value = 800;
-      gain.gain.setValueAtTime(0.3, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
-      osc.start(); osc.stop(ctx.currentTime + 0.5);
+      const now = ctx.currentTime;
+      const frequencies = [660, 880, 1320]; // Mi · La · Mi (octava)
+      frequencies.forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        const start = now + i * 0.18;
+        gain.gain.setValueAtTime(0, start);
+        gain.gain.linearRampToValueAtTime(0.45, start + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, start + 0.22);
+        osc.start(start); osc.stop(start + 0.25);
+      });
     } catch {}
   };
 
   const startTimer = (seconds) => {
-    setTimerTotal(seconds);
-    setTimerSeconds(seconds);
+    const capped = Math.min(REST_MAX, Math.max(0, seconds));
+    setTimerTotal(capped);
+    setTimerSeconds(capped);
     setTimerRunning(true);
   };
   const toggleTimer = () => {
@@ -76,8 +113,8 @@ export default function App() {
   };
   const closeTimer = () => { setTimerRunning(false); setTimerSeconds(0); setTimerTotal(0); };
   const addTimerSeconds = (delta) => {
-    setTimerSeconds(s => Math.max(0, s + delta));
-    setTimerTotal(t => Math.max(0, t + delta));
+    setTimerSeconds(s => Math.max(0, Math.min(REST_MAX, s + delta)));
+    setTimerTotal(t => Math.max(0, Math.min(REST_MAX, t + delta)));
   };
 
   // Acciones sobre el perfil activo
@@ -142,6 +179,58 @@ export default function App() {
     updateProfile(p => { p.routineId = routineId; p.checks = {}; return p; });
     setView('workout');
     setExpandedDay(null);
+  };
+
+  // Body ──────────────────────────────────────────────
+  const saveBody = (data) => {
+    updateProfile(p => {
+      p.body = { ...(p.body || {}), ...data };
+      return p;
+    });
+  };
+
+  const saveMeasurement = ({ weight, bodyFat }) => {
+    updateProfile(p => {
+      const body = p.body || { measurements: [] };
+      const measurements = [...(body.measurements || [])];
+      const idx = measurements.findIndex(m => m.week === p.week);
+      const entry = {
+        week: p.week,
+        date: new Date().toISOString(),
+        weight: parseFloat(weight),
+        bodyFat: bodyFat ? parseFloat(bodyFat) : null,
+      };
+      if (idx >= 0) measurements[idx] = entry; else measurements.push(entry);
+      measurements.sort((a, b) => a.week - b.week);
+      p.body = { ...body, measurements };
+      return p;
+    });
+  };
+
+  // Custom routines ───────────────────────────────────
+  const saveCustomRoutine = (routineObj) => {
+    updateProfile(p => {
+      p.customRoutines = { ...(p.customRoutines || {}), [routineObj.id]: routineObj };
+      return p;
+    });
+  };
+
+  const deleteCustomRoutine = (routineId) => {
+    if (!profile) return;
+    const r = profile.customRoutines?.[routineId];
+    if (!r) return;
+    if (!window.confirm(`¿Eliminar la rutina "${r.name}"? Se borrarán también los pesos registrados asociados.`)) return;
+    updateProfile(p => {
+      const custom = { ...(p.customRoutines || {}) };
+      delete custom[routineId];
+      p.customRoutines = custom;
+      // Si era la activa, vuelve a un preset
+      if (p.routineId === routineId) {
+        p.routineId = 'ppl';
+        p.checks = {};
+      }
+      return p;
+    });
   };
 
   const createProfile = (name, routineId) => {
@@ -264,11 +353,16 @@ export default function App() {
         <ProfileView
           profile={profile}
           root={root}
+          allRoutines={allRoutines}
           onSwitchRoutine={switchRoutine}
           onSwitchProfile={switchProfile}
           onDeleteProfile={deleteProfile}
           onLogout={logout}
           onNewProfile={() => persist({ ...root, currentProfile: null })}
+          onOpenBodyEditor={() => setBodyEditorOpen(true)}
+          onOpenMeasurementModal={() => setMeasurementModalOpen(true)}
+          onOpenRoutineEditor={(mode, r) => setRoutineEditor({ mode, routine: r })}
+          onDeleteCustomRoutine={deleteCustomRoutine}
         />
       )}
 
@@ -290,6 +384,40 @@ export default function App() {
       )}
 
       {/* Weight modal */}
+      {/* Body editor */}
+      {bodyEditorOpen && (
+        <BodyEditorModal
+          body={profile.body || {}}
+          onSave={(data) => { saveBody(data); setBodyEditorOpen(false); }}
+          onClose={() => setBodyEditorOpen(false)}
+        />
+      )}
+
+      {/* Measurement modal (registro semanal) */}
+      {measurementModalOpen && (
+        <MeasurementModal
+          profile={profile}
+          onSave={(data) => { saveMeasurement(data); setMeasurementModalOpen(false); }}
+          onClose={() => setMeasurementModalOpen(false)}
+        />
+      )}
+
+      {/* Routine editor */}
+      {routineEditor && (
+        <RoutineEditorModal
+          mode={routineEditor.mode}
+          initial={routineEditor.routine}
+          existingIds={new Set([...Object.keys(ROUTINES), ...Object.keys(profile.customRoutines || {})])}
+          onSave={(r) => {
+            saveCustomRoutine(r);
+            setRoutineEditor(null);
+            // Si fue crear/duplicar, cambia a esa rutina
+            if (routineEditor.mode !== 'edit') switchRoutine(r.id);
+          }}
+          onClose={() => setRoutineEditor(null)}
+        />
+      )}
+
       {weightModalOpen && (() => {
         const [dk, idxStr] = weightModalOpen.split('-');
         const i = parseInt(idxStr);
@@ -457,11 +585,13 @@ function HomeView({ profile, routine, weekPercent, daysCompleted, totalDays, tot
             </div>
             <button
               onClick={onResetWeek}
-              className="tap rounded-full bg-stone-800 hover:bg-stone-700 transition-colors border border-stone-700 flex-shrink-0"
+              className="flex items-center gap-2 px-3.5 py-2.5 rounded-full bg-stone-800 hover:bg-stone-700 transition-colors border border-stone-700 flex-shrink-0 min-h-[44px]"
               aria-label="Empezar nueva semana"
               title="Nueva semana"
             >
-              <RotateCcw size={18} aria-hidden="true" />
+              <CalendarPlus size={16} aria-hidden="true" />
+              <span className="text-xs font-bold tracking-wider hidden sm:inline">NUEVA SEMANA</span>
+              <span className="text-xs font-bold tracking-wider sm:hidden">NUEVA</span>
             </button>
           </div>
 
@@ -622,10 +752,11 @@ function WorkoutView({ profile, routine, expandedDay, setExpandedDay, showInfo, 
             </div>
             <button
               onClick={onResetWeek}
-              className="tap rounded-full bg-stone-800 hover:bg-stone-700 border border-stone-700 flex-shrink-0"
+              className="flex items-center gap-2 px-3 py-2 rounded-full bg-stone-800 hover:bg-stone-700 border border-stone-700 flex-shrink-0 min-h-[44px]"
               aria-label="Empezar nueva semana"
             >
-              <RotateCcw size={16} aria-hidden="true" />
+              <CalendarPlus size={14} aria-hidden="true" />
+              <span className="text-[11px] font-bold tracking-wider hidden sm:inline">NUEVA</span>
             </button>
           </div>
           <div className="h-2 bg-stone-800 rounded-full overflow-hidden" role="progressbar" aria-valuenow={Math.round(weekPercent)} aria-valuemin="0" aria-valuemax="100">
@@ -973,9 +1104,24 @@ function MiniChart({ history }) {
 }
 
 /* ─────────────────────── PROFILE VIEW ─────────────────────── */
-function ProfileView({ profile, root, onSwitchRoutine, onSwitchProfile, onDeleteProfile, onLogout, onNewProfile }) {
+function ProfileView({ profile, root, allRoutines, onSwitchRoutine, onSwitchProfile, onDeleteProfile, onLogout, onNewProfile, onOpenBodyEditor, onOpenMeasurementModal, onOpenRoutineEditor, onDeleteCustomRoutine }) {
   const profiles = Object.values(root.profiles);
   const currentRoutineId = profile.routineId;
+  const body = profile.body || {};
+  const measurements = body.measurements || [];
+  const thisWeekMeasurement = measurements.find(m => m.week === profile.week);
+  const lastMeasurement = measurements.length > 0 ? measurements[measurements.length - 1] : null;
+  const currentWeight = lastMeasurement?.weight;
+  const bmiValue = bmi(currentWeight, body.height);
+  const bmiCat = bmiCategory(bmiValue);
+  const bfValue = bodyFatPercent(currentWeight, body.height, body.age, body.sex);
+  const bfCat = bodyFatCategory(bfValue, body.sex);
+  const bmrValue = bmr(currentWeight, body.height, body.age, body.sex);
+  const maintenanceValue = maintenance(bmrValue, body.activity || 1.55);
+  const lean = leanMass(currentWeight, bfValue);
+  const ffmiValue = ffmi(lean, body.height);
+  const idealW = idealWeight(body.height, body.sex);
+  const hasBodyData = !!(body.height && body.age && body.sex);
 
   const exportData = () => {
     const data = JSON.stringify(root, null, 2);
@@ -1025,37 +1171,213 @@ function ProfileView({ profile, root, onSwitchRoutine, onSwitchProfile, onDelete
       </header>
 
       <div className="max-w-4xl mx-auto px-5 py-6 space-y-6">
+        {/* ── CUERPO ───────────────────────────────── */}
         <section>
-          <h2 className="text-xs font-bold tracking-[0.25em] text-stone-500 mb-3">CAMBIAR RUTINA</h2>
-          <div className="grid gap-2">
-            {ROUTINE_LIST.map(r => {
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-xs font-bold tracking-[0.25em] text-stone-500">CUERPO</h2>
+            <button
+              onClick={onOpenBodyEditor}
+              className="text-[11px] font-bold tracking-wider text-orange-400 hover:text-orange-300 flex items-center gap-1 min-h-[32px]"
+            >
+              <Edit3 size={12} aria-hidden="true" />
+              {hasBodyData ? 'EDITAR' : 'CONFIGURAR'}
+            </button>
+          </div>
+
+          {!hasBodyData ? (
+            <button
+              onClick={onOpenBodyEditor}
+              className="w-full text-left bg-stone-900 border border-dashed border-stone-700 rounded-2xl p-5 hover:border-orange-500/50 transition-colors"
+            >
+              <div className="flex items-center gap-3 mb-2">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-orange-500 to-pink-600 flex items-center justify-center">
+                  <Scale size={18} aria-hidden="true" />
+                </div>
+                <div>
+                  <div className="font-display text-lg font-bold uppercase">Registra tus datos</div>
+                  <div className="text-xs text-stone-400">Para ver BMI, % grasa, BMR y calorías</div>
+                </div>
+              </div>
+              <div className="text-xs text-stone-500">Todo opcional · se guarda solo en tu navegador</div>
+            </button>
+          ) : (
+            <div className="space-y-3">
+              {/* Resumen datos base */}
+              <div className="bg-stone-900 border border-stone-800 rounded-2xl p-4">
+                <div className="grid grid-cols-3 gap-3">
+                  <InfoCell label="ALTURA" value={body.height} unit="cm" />
+                  <InfoCell label="EDAD" value={body.age} unit="años" />
+                  <InfoCell label="SEXO" value={body.sex === 'male' ? 'H' : body.sex === 'female' ? 'M' : '—'} />
+                </div>
+              </div>
+
+              {/* Registro semanal */}
+              <div className="bg-stone-900 border border-stone-800 rounded-2xl p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <div className="text-[11px] font-bold tracking-[0.2em] text-stone-500">SEMANA {profile.week}</div>
+                    <div className="font-display text-lg font-bold">
+                      {thisWeekMeasurement
+                        ? <span>{thisWeekMeasurement.weight}<span className="text-sm text-stone-500">kg</span></span>
+                        : <span className="text-stone-500">Sin registro</span>}
+                    </div>
+                  </div>
+                  <button
+                    onClick={onOpenMeasurementModal}
+                    className="btn-primary px-4 py-2.5 rounded-xl text-xs font-bold text-white flex items-center gap-1.5"
+                  >
+                    {thisWeekMeasurement ? <><Edit3 size={14} aria-hidden="true" />ACTUALIZAR</> : <><Plus size={14} aria-hidden="true" />REGISTRAR</>}
+                  </button>
+                </div>
+
+                {measurements.length >= 2 && (
+                  <BodyWeightChart measurements={measurements} />
+                )}
+              </div>
+
+              {/* Métricas calculadas */}
+              {currentWeight && (
+                <div className="grid grid-cols-2 gap-2">
+                  {bmiValue != null && (
+                    <MetricCard
+                      label="BMI"
+                      value={bmiValue.toFixed(1)}
+                      unit=""
+                      tag={bmiCat?.label}
+                      tagColor={bmiCat?.color}
+                      tagBg={bmiCat?.bg}
+                      icon={Activity}
+                    />
+                  )}
+                  {bfValue != null && (
+                    <MetricCard
+                      label="% GRASA"
+                      value={bfValue.toFixed(1)}
+                      unit="%"
+                      tag={bfCat?.label}
+                      tagColor={bfCat?.color}
+                      tagBg={bfCat?.bg}
+                      icon={Heart}
+                    />
+                  )}
+                  {bmrValue != null && (
+                    <MetricCard
+                      label="BMR"
+                      value={Math.round(bmrValue)}
+                      unit="kcal"
+                      hint="reposo / día"
+                      icon={FlameIcon}
+                    />
+                  )}
+                  {maintenanceValue != null && (
+                    <MetricCard
+                      label="MANTENIM."
+                      value={Math.round(maintenanceValue)}
+                      unit="kcal"
+                      hint={ACTIVITY_LEVELS.find(a => a.id === (body.activity || 1.55))?.label.toLowerCase() || ''}
+                      icon={TrendingUp}
+                    />
+                  )}
+                  {lean != null && (
+                    <MetricCard
+                      label="MASA MAGRA"
+                      value={lean.toFixed(1)}
+                      unit="kg"
+                      hint="peso sin grasa"
+                      icon={Dumbbell}
+                    />
+                  )}
+                  {idealW != null && (
+                    <MetricCard
+                      label="PESO IDEAL"
+                      value={idealW.toFixed(0)}
+                      unit="kg"
+                      hint="referencia"
+                      icon={Target}
+                    />
+                  )}
+                </div>
+              )}
+
+              {!currentWeight && (
+                <div className="text-xs text-stone-500 text-center py-2">
+                  Registra un peso para ver tus métricas calculadas.
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
+        {/* ── RUTINAS ──────────────────────────────── */}
+        <section>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-xs font-bold tracking-[0.25em] text-stone-500">CAMBIAR RUTINA</h2>
+            <button
+              onClick={() => onOpenRoutineEditor('create')}
+              className="text-[11px] font-bold tracking-wider text-cta-400 hover:text-cta-300 flex items-center gap-1 min-h-[32px]"
+            >
+              <Plus size={12} aria-hidden="true" />CREAR
+            </button>
+          </div>
+          <div className="grid gap-2 stagger">
+            {allRoutines.map(r => {
               const Icon = IconOf(r.icon);
               const current = r.id === currentRoutineId;
+              const isCustom = !ROUTINES[r.id];
               return (
-                <button
+                <div
                   key={r.id}
-                  onClick={() => !current && onSwitchRoutine(r.id)}
-                  disabled={current}
                   className={`text-left p-3 rounded-2xl border flex items-center gap-3 transition-all ${
                     current
                       ? 'bg-stone-900 border-orange-500/50 ring-2 ring-orange-500/20'
                       : 'bg-stone-900 border-stone-800 hover:border-stone-700'
                   }`}
                 >
-                  <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${r.accent} flex items-center justify-center flex-shrink-0`}>
-                    <Icon size={18} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="font-bold text-sm truncate">{r.name}</div>
-                    <div className="text-xs text-stone-500 truncate">{r.description}</div>
-                    <div className="text-[10px] text-stone-600 mt-0.5">{r.level} · {r.daysPerWeek} días/sem</div>
-                  </div>
-                  {current && (
-                    <div className="text-[10px] bg-orange-500/20 text-orange-300 px-2 py-1 rounded-full font-bold tracking-wider flex-shrink-0">
-                      ACTUAL
+                  <button
+                    onClick={() => !current && onSwitchRoutine(r.id)}
+                    disabled={current}
+                    className="flex items-center gap-3 flex-1 min-w-0 text-left"
+                    aria-label={current ? `Rutina activa: ${r.name}` : `Activar rutina ${r.name}`}
+                  >
+                    <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${r.accent} flex items-center justify-center flex-shrink-0`}>
+                      <Icon size={18} aria-hidden="true" />
                     </div>
-                  )}
-                </button>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold text-sm truncate flex items-center gap-2">
+                        {r.name}
+                        {isCustom && (
+                          <span className="text-[9px] bg-cta-500/20 text-cta-300 px-1.5 py-0.5 rounded-full font-bold tracking-widest">MÍA</span>
+                        )}
+                      </div>
+                      <div className="text-xs text-stone-500 truncate">{r.description}</div>
+                      <div className="text-[10px] text-stone-600 mt-0.5">{r.level} · {r.daysPerWeek} días/sem</div>
+                    </div>
+                    {current && (
+                      <div className="text-[10px] bg-orange-500/20 text-orange-300 px-2 py-1 rounded-full font-bold tracking-wider flex-shrink-0">
+                        ACTUAL
+                      </div>
+                    )}
+                  </button>
+                  <div className="flex gap-0.5 flex-shrink-0">
+                    <button
+                      onClick={() => onOpenRoutineEditor(isCustom ? 'edit' : 'duplicate', r)}
+                      className="tap rounded-lg text-stone-500 hover:text-orange-400 hover:bg-stone-800"
+                      aria-label={isCustom ? `Editar ${r.name}` : `Duplicar y editar ${r.name}`}
+                      title={isCustom ? 'Editar' : 'Duplicar para editar'}
+                    >
+                      {isCustom ? <Edit3 size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
+                    </button>
+                    {isCustom && (
+                      <button
+                        onClick={() => onDeleteCustomRoutine(r.id)}
+                        className="tap rounded-lg text-stone-500 hover:text-red-400 hover:bg-stone-800"
+                        aria-label={`Eliminar ${r.name}`}
+                      >
+                        <Trash2 size={14} aria-hidden="true" />
+                      </button>
+                    )}
+                  </div>
+                </div>
               );
             })}
           </div>
@@ -1224,17 +1546,31 @@ function RestTimer({ timerSeconds, timerTotal, timerRunning, onClose, onToggle, 
           <div className="h-full bg-gradient-to-r from-orange-500 to-red-500 transition-all duration-1000 ease-linear" style={{ width: `${progress}%` }} />
         </div>
         <div className="flex items-center justify-center gap-2">
-          <button onClick={() => onAdd(-15)} className="tap px-3 bg-stone-800 hover:bg-stone-700 rounded-xl text-xs font-bold flex items-center gap-1 transition-colors" aria-label="Restar 15 segundos">
+          <button
+            onClick={() => onAdd(-15)}
+            disabled={timerTotal <= 15}
+            className="tap px-3 bg-stone-800 hover:bg-stone-700 rounded-xl text-xs font-bold flex items-center gap-1 transition-colors disabled:opacity-40"
+            aria-label="Restar 15 segundos"
+          >
             <Minus size={14} aria-hidden="true" />15s
           </button>
           <button onClick={onToggle} className="btn-primary px-6 py-3 rounded-xl font-bold shadow-lg flex items-center gap-2 text-white" aria-label={timerRunning ? 'Pausar' : 'Reanudar'}>
             {timerRunning ? <Pause size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
             {timerRunning ? 'Pausa' : (timerSeconds === 0 ? 'Reiniciar' : 'Seguir')}
           </button>
-          <button onClick={() => onAdd(15)} className="tap px-3 bg-stone-800 hover:bg-stone-700 rounded-xl text-xs font-bold flex items-center gap-1 transition-colors" aria-label="Sumar 15 segundos">
+          <button
+            onClick={() => onAdd(15)}
+            disabled={timerTotal >= 300}
+            className="tap px-3 bg-stone-800 hover:bg-stone-700 rounded-xl text-xs font-bold flex items-center gap-1 transition-colors disabled:opacity-40"
+            aria-label="Sumar 15 segundos"
+            title={timerTotal >= 300 ? 'Máximo 5 min' : undefined}
+          >
             <Plus size={14} aria-hidden="true" />15s
           </button>
         </div>
+        {timerTotal >= 285 && (
+          <div className="text-[10px] text-stone-500 text-center mt-2 tracking-wider">MÁXIMO 5 MINUTOS</div>
+        )}
       </div>
     </div>
   );
@@ -1370,5 +1706,715 @@ function WeightModal({ exercise, history, currentWeek, onSave, onClose }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/* ─────────────────────── BODY METRICS HELPERS ─────────────────────── */
+
+function InfoCell({ label, value, unit }) {
+  return (
+    <div className="text-center">
+      <div className="text-[10px] text-stone-500 font-bold tracking-[0.2em] mb-1">{label}</div>
+      <div className="stat-number text-xl">
+        {value ?? '—'}
+        {unit && value != null && <span className="text-xs text-stone-500 font-normal ml-1 tracking-normal">{unit}</span>}
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({ label, value, unit, hint, tag, tagColor, tagBg, icon: Icon }) {
+  return (
+    <div className="bg-stone-900 border border-stone-800 rounded-2xl p-3.5 animate-fadeIn">
+      <div className="flex items-center gap-1.5 text-[10px] text-stone-500 font-bold tracking-[0.2em] mb-2">
+        {Icon && <Icon size={11} aria-hidden="true" />}
+        <span>{label}</span>
+      </div>
+      <div className="stat-number text-2xl text-white mb-1">
+        {value}
+        {unit && <span className="text-xs text-stone-500 font-normal ml-1 tracking-normal">{unit}</span>}
+      </div>
+      {tag ? (
+        <div className={`inline-block text-[9px] font-bold tracking-widest px-1.5 py-0.5 rounded-full ${tagBg} ${tagColor}`}>
+          {tag.toUpperCase()}
+        </div>
+      ) : hint ? (
+        <div className="text-[10px] text-stone-500">{hint}</div>
+      ) : null}
+    </div>
+  );
+}
+
+// Gráfica mini de progresión del peso corporal (reutiliza el estilo del MiniChart)
+function BodyWeightChart({ measurements }) {
+  if (!measurements || measurements.length < 2) return null;
+  const W = 100, H = 50;
+  const max = Math.max(...measurements.map(m => m.weight));
+  const min = Math.min(...measurements.map(m => m.weight));
+  const range = Math.max(0.5, max - min);
+  const points = measurements.map((m, i) => {
+    const x = (i / (measurements.length - 1)) * W;
+    const y = H - ((m.weight - min) / range) * (H - 10) - 5;
+    return [x, y];
+  });
+  const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0]},${p[1]}`).join(' ');
+  const areaPath = `${linePath} L${W},${H} L0,${H} Z`;
+  const first = measurements[0].weight;
+  const last = measurements[measurements.length - 1].weight;
+  const deltaKg = last - first;
+  const id = Math.random().toString(36).slice(2, 8);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1 text-[10px] text-stone-500 font-bold tracking-wider">
+        <span>S{measurements[0].week}</span>
+        <span className={deltaKg === 0 ? 'text-stone-500' : deltaKg < 0 ? 'text-cta-400' : 'text-orange-400'}>
+          {deltaKg > 0 ? '+' : ''}{deltaKg.toFixed(1)} kg
+        </span>
+        <span>S{measurements[measurements.length - 1].week}</span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-12 overflow-visible" preserveAspectRatio="none" role="img" aria-label="Evolución del peso corporal">
+        <defs>
+          <linearGradient id={`bw-${id}`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#22C55E" stopOpacity="0.4" />
+            <stop offset="100%" stopColor="#22C55E" stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <path d={areaPath} fill={`url(#bw-${id})`} />
+        <path d={linePath} fill="none" stroke="#22C55E" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+        {points.map((p, i) => (
+          <circle key={i} cx={p[0]} cy={p[1]} r="2" fill="#22C55E" vectorEffect="non-scaling-stroke" />
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+/* ─────────────────────── BODY EDITOR MODAL ─────────────────────── */
+
+function BodyEditorModal({ body, onSave, onClose }) {
+  const [height, setHeight] = useState(body.height ?? '');
+  const [age, setAge] = useState(body.age ?? '');
+  const [sex, setSex] = useState(body.sex ?? '');
+  const [activity, setActivity] = useState(body.activity ?? 1.55);
+
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => { document.body.style.overflow = prev; window.removeEventListener('keydown', onKey); };
+  }, [onClose]);
+
+  const canSave = height && age && sex;
+
+  return (
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4 animate-fadeIn" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="body-title">
+      <div className="bg-stone-900 border border-stone-800 rounded-3xl w-full max-w-md max-h-[90vh] overflow-y-auto animate-slideUp" onClick={e => e.stopPropagation()}>
+        <div className="sticky top-0 bg-stone-900 border-b border-stone-800 p-5 flex items-center justify-between z-10">
+          <div>
+            <div className="text-[11px] text-orange-400 font-bold tracking-[0.25em] mb-1">TUS DATOS</div>
+            <h3 id="body-title" className="font-display text-xl font-black uppercase">Datos corporales</h3>
+          </div>
+          <button onClick={onClose} className="tap rounded-full hover:bg-stone-800" aria-label="Cerrar">
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+        <div className="p-5 space-y-5">
+          <p className="text-xs text-stone-400">Todo es opcional. Sólo se usa para calcular tus métricas (BMI, % grasa, BMR). Nada se envía a ningún servidor.</p>
+
+          {/* Altura */}
+          <div>
+            <label htmlFor="b-height" className="block text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-2">ALTURA (CM)</label>
+            <input
+              id="b-height" type="number" inputMode="numeric" min="100" max="250" value={height}
+              onChange={e => setHeight(e.target.value)}
+              className="stat-number w-full bg-stone-950 border border-stone-800 rounded-xl px-4 py-3 text-2xl text-center focus:outline-none focus:border-orange-500"
+              placeholder="175"
+            />
+          </div>
+
+          {/* Edad */}
+          <div>
+            <label htmlFor="b-age" className="block text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-2">EDAD</label>
+            <input
+              id="b-age" type="number" inputMode="numeric" min="10" max="120" value={age}
+              onChange={e => setAge(e.target.value)}
+              className="stat-number w-full bg-stone-950 border border-stone-800 rounded-xl px-4 py-3 text-2xl text-center focus:outline-none focus:border-orange-500"
+              placeholder="25"
+            />
+          </div>
+
+          {/* Sexo */}
+          <div>
+            <div className="text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-2">SEXO BIOLÓGICO <span className="text-stone-600 font-normal tracking-normal">· para cálculos</span></div>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { id: 'male', label: 'Hombre' },
+                { id: 'female', label: 'Mujer' },
+              ].map(o => (
+                <button
+                  key={o.id}
+                  onClick={() => setSex(o.id)}
+                  className={`min-h-[52px] rounded-xl border font-bold text-sm transition-colors ${
+                    sex === o.id ? 'bg-orange-500/10 border-orange-500/60 text-orange-200' : 'bg-stone-950 border-stone-800 text-stone-300 hover:border-stone-700'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Actividad */}
+          <div>
+            <div className="text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-2">NIVEL DE ACTIVIDAD</div>
+            <div className="space-y-1.5">
+              {ACTIVITY_LEVELS.map(a => (
+                <button
+                  key={a.id}
+                  onClick={() => setActivity(a.id)}
+                  className={`w-full text-left p-3 rounded-xl border transition-colors flex items-center gap-2 ${
+                    activity === a.id ? 'bg-orange-500/10 border-orange-500/50' : 'bg-stone-950 border-stone-800 hover:border-stone-700'
+                  }`}
+                >
+                  <div className={`w-4 h-4 rounded-full border-2 flex-shrink-0 ${activity === a.id ? 'bg-orange-500 border-orange-500' : 'border-stone-600'}`} aria-hidden="true" />
+                  <div className="flex-1">
+                    <div className="text-sm font-bold">{a.label}</div>
+                    <div className="text-[11px] text-stone-500">{a.desc}</div>
+                  </div>
+                  <div className="text-[10px] font-mono text-stone-500">×{a.id}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <button
+            onClick={() => canSave && onSave({
+              height: parseFloat(height), age: parseInt(age), sex, activity,
+            })}
+            disabled={!canSave}
+            className="btn-cta w-full py-3 rounded-xl font-bold text-white shadow-lg disabled:opacity-40 disabled:cursor-not-allowed text-base flex items-center justify-center gap-2"
+          >
+            <Save size={16} aria-hidden="true" />
+            Guardar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────── MEASUREMENT MODAL ─────────────────────── */
+
+function MeasurementModal({ profile, onSave, onClose }) {
+  const measurements = profile.body?.measurements || [];
+  const thisWeek = measurements.find(m => m.week === profile.week);
+  const lastEntry = measurements[measurements.length - 1] || null;
+  const [weight, setWeight] = useState(
+    thisWeek ? thisWeek.weight.toString()
+      : lastEntry ? lastEntry.weight.toString() : ''
+  );
+  const [bodyFat, setBodyFat] = useState(
+    thisWeek?.bodyFat != null ? thisWeek.bodyFat.toString()
+      : lastEntry?.bodyFat != null ? lastEntry.bodyFat.toString() : ''
+  );
+
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => { document.body.style.overflow = prev; window.removeEventListener('keydown', onKey); };
+  }, [onClose]);
+
+  const adjust = (delta) => {
+    const current = parseFloat(weight) || 0;
+    setWeight(Math.max(0, current + delta).toFixed(1).replace(/\.0$/, ''));
+  };
+
+  const firstEntry = measurements[0];
+  const deltaFromFirst = firstEntry && weight ? parseFloat(weight) - firstEntry.weight : 0;
+  const deltaFromLast = lastEntry && weight ? parseFloat(weight) - lastEntry.weight : 0;
+
+  return (
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4 animate-fadeIn" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="meas-title">
+      <div className="bg-stone-900 border border-stone-800 rounded-3xl w-full max-w-md max-h-[90vh] overflow-y-auto animate-slideUp" onClick={e => e.stopPropagation()}>
+        <div className="sticky top-0 bg-stone-900 border-b border-stone-800 p-5 flex items-center justify-between z-10">
+          <div>
+            <div className="text-[11px] text-cta-400 font-bold tracking-[0.25em] mb-1">SEMANA {profile.week}</div>
+            <h3 id="meas-title" className="font-display text-xl font-black uppercase">Tu peso</h3>
+          </div>
+          <button onClick={onClose} className="tap rounded-full hover:bg-stone-800" aria-label="Cerrar">
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+        <div className="p-5 space-y-5">
+          <div>
+            <label htmlFor="m-weight" className="block text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-2">PESO (KG)</label>
+            <div className="flex items-center gap-2">
+              <button onClick={() => adjust(-0.5)} className="min-w-[48px] min-h-[56px] bg-stone-800 hover:bg-stone-700 rounded-xl font-bold text-xl" aria-label="Restar 0.5 kg">−</button>
+              <input
+                id="m-weight" type="number" step="0.1" inputMode="decimal" value={weight}
+                onChange={e => setWeight(e.target.value)}
+                className="stat-number flex-1 bg-stone-950 border border-stone-800 rounded-xl px-4 py-3 text-4xl text-center focus:outline-none focus:border-cta-500 min-w-0"
+                placeholder="0"
+              />
+              <button onClick={() => adjust(0.5)} className="min-w-[48px] min-h-[56px] bg-stone-800 hover:bg-stone-700 rounded-xl font-bold text-xl" aria-label="Sumar 0.5 kg">+</button>
+            </div>
+          </div>
+
+          <div>
+            <label htmlFor="m-bf" className="block text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-2">% GRASA <span className="text-stone-600 font-normal tracking-normal">· opcional (báscula inteligente)</span></label>
+            <input
+              id="m-bf" type="number" step="0.1" inputMode="decimal" min="2" max="60" value={bodyFat}
+              onChange={e => setBodyFat(e.target.value)}
+              className="stat-number w-full bg-stone-950 border border-stone-800 rounded-xl px-4 py-3 text-2xl text-center focus:outline-none focus:border-cta-500"
+              placeholder="si lo tienes"
+            />
+          </div>
+
+          {weight && measurements.length > 0 && (
+            <div className="grid grid-cols-2 gap-2">
+              <div className="bg-stone-950 border border-stone-800 rounded-xl p-3 text-center">
+                <div className="text-[10px] text-stone-500 font-bold tracking-[0.2em] mb-1">vs INICIO</div>
+                <div className={`stat-number text-xl ${deltaFromFirst === 0 ? 'text-stone-300' : deltaFromFirst < 0 ? 'text-cta-400' : 'text-orange-400'}`}>
+                  {deltaFromFirst > 0 ? '+' : ''}{deltaFromFirst.toFixed(1)}<span className="text-xs text-stone-500 tracking-normal">kg</span>
+                </div>
+              </div>
+              <div className="bg-stone-950 border border-stone-800 rounded-xl p-3 text-center">
+                <div className="text-[10px] text-stone-500 font-bold tracking-[0.2em] mb-1">vs ÚLTIMO</div>
+                <div className={`stat-number text-xl ${deltaFromLast === 0 ? 'text-stone-300' : deltaFromLast < 0 ? 'text-cta-400' : 'text-orange-400'}`}>
+                  {deltaFromLast > 0 ? '+' : ''}{deltaFromLast.toFixed(1)}<span className="text-xs text-stone-500 tracking-normal">kg</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {measurements.length > 0 && (
+            <div>
+              <div className="text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-2">HISTORIAL</div>
+              <div className="bg-stone-950 border border-stone-800 rounded-xl p-3 max-h-40 overflow-y-auto space-y-1">
+                {[...measurements].reverse().map((m, i) => (
+                  <div key={i} className="flex items-center justify-between text-sm py-1.5 border-b border-stone-800 last:border-0">
+                    <span className="text-stone-400">Semana {m.week}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="stat-number text-sm">{m.weight}kg</span>
+                      {m.bodyFat != null && <span className="text-[10px] text-stone-500">{m.bodyFat}%</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <button
+            onClick={() => weight && onSave({ weight, bodyFat: bodyFat || null })}
+            disabled={!weight}
+            className="btn-cta w-full py-3 rounded-xl font-bold text-white shadow-lg disabled:opacity-40 disabled:cursor-not-allowed text-base"
+          >
+            Guardar Semana {profile.week}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────── ROUTINE EDITOR MODAL ─────────────────────── */
+
+const COLOR_OPTIONS = [
+  'from-orange-500 to-red-600',
+  'from-emerald-500 to-teal-600',
+  'from-violet-500 to-purple-600',
+  'from-blue-500 to-cyan-600',
+  'from-pink-500 to-rose-600',
+  'from-amber-500 to-orange-600',
+  'from-sky-500 to-blue-600',
+  'from-indigo-500 to-violet-600',
+  'from-lime-500 to-emerald-600',
+];
+const ICON_OPTIONS = ['Zap', 'Flame', 'Target', 'Dumbbell', 'Activity', 'Trophy'];
+
+const blankExercise = () => ({ name: '', sets: '3', reps: '10', note: '', trackWeight: true, rest: 60 });
+const blankDay = (idx = 1) => ({
+  name: `Día ${idx}`, focus: 'Entrenamiento', iconName: 'Zap',
+  color: COLOR_OPTIONS[(idx - 1) % COLOR_OPTIONS.length], hint: '',
+  exercises: [blankExercise()],
+});
+
+function makeUniqueId(base, existingIds) {
+  const slug = base.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'rutina';
+  let id = `custom-${slug}`;
+  let n = 2;
+  while (existingIds.has(id)) { id = `custom-${slug}-${n++}`; }
+  return id;
+}
+
+function RoutineEditorModal({ mode, initial, existingIds, onSave, onClose }) {
+  // Estructura base — cuando se duplica/edita, partir de initial (deep clone)
+  const seed = () => {
+    if (mode === 'create' || !initial) {
+      return {
+        id: null, name: '', tagline: '', description: '', level: 'Intermedio',
+        icon: 'Dumbbell', accent: COLOR_OPTIONS[0],
+        days: { d1: blankDay(1) },
+      };
+    }
+    const clone = JSON.parse(JSON.stringify(initial));
+    if (mode === 'duplicate') {
+      clone.id = null; // se regenera al guardar
+      clone.name = `${clone.name} (copia)`;
+    }
+    return clone;
+  };
+  const [form, setForm] = useState(seed);
+  const [expandedDay, setExpandedDay] = useState(() => Object.keys(seed().days)[0]);
+
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => { document.body.style.overflow = prev; window.removeEventListener('keydown', onKey); };
+  }, [onClose]);
+
+  const dayKeys = Object.keys(form.days);
+
+  const updateDay = (dk, patch) => {
+    setForm(f => ({ ...f, days: { ...f.days, [dk]: { ...f.days[dk], ...patch } } }));
+  };
+
+  const addDay = () => {
+    const nextKey = `d${dayKeys.length + 1}-${Math.random().toString(36).slice(2, 5)}`;
+    setForm(f => ({ ...f, days: { ...f.days, [nextKey]: blankDay(dayKeys.length + 1) } }));
+    setExpandedDay(nextKey);
+  };
+
+  const removeDay = (dk) => {
+    if (dayKeys.length <= 1) { alert('La rutina necesita al menos un día.'); return; }
+    setForm(f => {
+      const days = { ...f.days };
+      delete days[dk];
+      return { ...f, days };
+    });
+    if (expandedDay === dk) setExpandedDay(Object.keys(form.days).filter(k => k !== dk)[0]);
+  };
+
+  const addExercise = (dk) => {
+    setForm(f => ({
+      ...f,
+      days: { ...f.days, [dk]: { ...f.days[dk], exercises: [...f.days[dk].exercises, blankExercise()] } },
+    }));
+  };
+  const updateExercise = (dk, i, patch) => {
+    setForm(f => {
+      const exs = [...f.days[dk].exercises];
+      exs[i] = { ...exs[i], ...patch };
+      return { ...f, days: { ...f.days, [dk]: { ...f.days[dk], exercises: exs } } };
+    });
+  };
+  const removeExercise = (dk, i) => {
+    setForm(f => {
+      const exs = f.days[dk].exercises.filter((_, idx) => idx !== i);
+      return { ...f, days: { ...f.days, [dk]: { ...f.days[dk], exercises: exs.length ? exs : [blankExercise()] } } };
+    });
+  };
+
+  const canSave = form.name.trim() && dayKeys.length > 0 && dayKeys.every(dk => form.days[dk].exercises.some(ex => ex.name.trim()));
+
+  const submit = () => {
+    if (!canSave) return;
+    const id = mode === 'edit' && form.id ? form.id : makeUniqueId(form.name, existingIds);
+    const cleaned = {
+      ...form,
+      id,
+      daysPerWeek: dayKeys.length,
+      tagline: form.tagline || `${dayKeys.length} días/semana`,
+      description: form.description || form.tagline || '',
+      days: Object.fromEntries(
+        dayKeys.map(dk => [dk, {
+          ...form.days[dk],
+          exercises: form.days[dk].exercises
+            .filter(ex => ex.name.trim())
+            .map(ex => ({
+              ...ex,
+              rest: Math.max(0, Math.min(REST_MAX, parseInt(ex.rest) || 0)),
+              trackWeight: !!ex.trackWeight,
+            })),
+        }])
+      ),
+    };
+    onSave(cleaned);
+  };
+
+  const title = mode === 'edit' ? 'Editar rutina' : mode === 'duplicate' ? 'Duplicar rutina' : 'Nueva rutina';
+
+  return (
+    <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-stretch justify-center animate-fadeIn" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="routine-title">
+      <div className="bg-stone-900 border-l border-r border-stone-800 w-full max-w-2xl max-h-full overflow-y-auto animate-slideUp" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="sticky top-0 bg-stone-900/95 backdrop-blur border-b border-stone-800 p-4 flex items-center justify-between z-20">
+          <div className="min-w-0">
+            <div className="text-[11px] text-cta-400 font-bold tracking-[0.25em] mb-0.5">{mode === 'edit' ? 'EDITANDO' : mode === 'duplicate' ? 'DUPLICANDO' : 'CREANDO'}</div>
+            <h3 id="routine-title" className="font-display text-xl font-black uppercase truncate">{title}</h3>
+          </div>
+          <div className="flex items-center gap-1">
+            <button onClick={submit} disabled={!canSave} className="btn-cta px-4 py-2 rounded-xl text-white text-sm font-bold disabled:opacity-40 flex items-center gap-1.5">
+              <Save size={14} aria-hidden="true" />Guardar
+            </button>
+            <button onClick={onClose} className="tap rounded-full hover:bg-stone-800" aria-label="Cerrar sin guardar">
+              <X size={18} aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+
+        <div className="p-4 space-y-5 pb-12">
+          {/* Datos generales */}
+          <section className="space-y-3">
+            <div>
+              <label className="block text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-1.5">NOMBRE DE LA RUTINA</label>
+              <input
+                value={form.name}
+                onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                placeholder="p.ej. Mi rutina de fuerza"
+                maxLength={40}
+                className="w-full bg-stone-950 border border-stone-800 rounded-xl px-4 py-3 focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-1.5">BREVE DESCRIPCIÓN</label>
+              <input
+                value={form.tagline}
+                onChange={e => setForm(f => ({ ...f, tagline: e.target.value }))}
+                placeholder="4 días · hipertrofia"
+                maxLength={60}
+                className="w-full bg-stone-950 border border-stone-800 rounded-xl px-4 py-3 focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-1.5">NIVEL</label>
+                <select
+                  value={form.level}
+                  onChange={e => setForm(f => ({ ...f, level: e.target.value }))}
+                  className="w-full bg-stone-950 border border-stone-800 rounded-xl px-3 py-3 focus:outline-none focus:border-orange-500"
+                >
+                  <option>Principiante</option>
+                  <option>Intermedio</option>
+                  <option>Avanzado</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-1.5">ICONO</label>
+                <div className="grid grid-cols-6 gap-1">
+                  {ICON_OPTIONS.map(ic => {
+                    const Ic = IconOf(ic);
+                    return (
+                      <button
+                        key={ic}
+                        onClick={() => setForm(f => ({ ...f, icon: ic }))}
+                        className={`aspect-square rounded-lg flex items-center justify-center transition-colors ${form.icon === ic ? 'bg-orange-500/20 ring-2 ring-orange-500/50' : 'bg-stone-950 border border-stone-800 hover:border-stone-700'}`}
+                        aria-label={`Icono ${ic}`}
+                      >
+                        <Ic size={16} aria-hidden="true" />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+            <div>
+              <label className="block text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-1.5">COLOR PRINCIPAL</label>
+              <div className="grid grid-cols-9 gap-1.5">
+                {COLOR_OPTIONS.map(c => (
+                  <button
+                    key={c}
+                    onClick={() => setForm(f => ({ ...f, accent: c }))}
+                    className={`aspect-square rounded-lg bg-gradient-to-br ${c} transition-all ${form.accent === c ? 'ring-2 ring-white/80 scale-105' : 'opacity-70 hover:opacity-100'}`}
+                    aria-label={`Color ${c}`}
+                  />
+                ))}
+              </div>
+            </div>
+          </section>
+
+          {/* Días */}
+          <section>
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-[11px] text-stone-400 font-bold tracking-[0.2em]">DÍAS ({dayKeys.length})</h4>
+              <button onClick={addDay} className="text-[11px] font-bold tracking-wider text-cta-400 flex items-center gap-1 min-h-[32px]">
+                <Plus size={12} aria-hidden="true" />DÍA
+              </button>
+            </div>
+            <div className="space-y-2">
+              {dayKeys.map((dk, dayIdx) => {
+                const day = form.days[dk];
+                const DIcon = IconOf(day.iconName);
+                const isOpen = expandedDay === dk;
+                return (
+                  <div key={dk} className="bg-stone-950 border border-stone-800 rounded-2xl overflow-hidden">
+                    <div className="flex items-center gap-2 p-3">
+                      <button
+                        onClick={() => setExpandedDay(isOpen ? null : dk)}
+                        className="flex items-center gap-2 flex-1 min-w-0 text-left"
+                      >
+                        <div className={`w-9 h-9 rounded-lg bg-gradient-to-br ${day.color} flex items-center justify-center flex-shrink-0`}>
+                          <DIcon size={14} aria-hidden="true" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-bold text-sm truncate">{day.name || `Día ${dayIdx + 1}`}</div>
+                          <div className="text-[11px] text-stone-500 truncate">{day.exercises.filter(e => e.name.trim()).length} ejercicios</div>
+                        </div>
+                        {isOpen ? <ChevronUp size={16} className="text-stone-500 flex-shrink-0" aria-hidden="true" /> : <ChevronDown size={16} className="text-stone-500 flex-shrink-0" aria-hidden="true" />}
+                      </button>
+                      <button onClick={() => removeDay(dk)} className="tap rounded-lg text-stone-500 hover:text-red-400" aria-label={`Eliminar ${day.name}`}>
+                        <Trash2 size={14} aria-hidden="true" />
+                      </button>
+                    </div>
+
+                    {isOpen && (
+                      <div className="border-t border-stone-800 p-3 space-y-3 animate-fadeIn">
+                        {/* Campos del día */}
+                        <div className="grid grid-cols-2 gap-2">
+                          <input
+                            value={day.name}
+                            onChange={e => updateDay(dk, { name: e.target.value })}
+                            placeholder="Nombre del día"
+                            maxLength={30}
+                            className="bg-stone-900 border border-stone-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-orange-500"
+                          />
+                          <input
+                            value={day.focus}
+                            onChange={e => updateDay(dk, { focus: e.target.value })}
+                            placeholder="Enfoque"
+                            maxLength={40}
+                            className="bg-stone-900 border border-stone-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-orange-500"
+                          />
+                        </div>
+                        <div className="flex gap-2 flex-wrap">
+                          <div className="flex gap-1">
+                            {ICON_OPTIONS.slice(0, 6).map(ic => {
+                              const Ic = IconOf(ic);
+                              return (
+                                <button
+                                  key={ic}
+                                  onClick={() => updateDay(dk, { iconName: ic })}
+                                  className={`tap rounded-lg ${day.iconName === ic ? 'bg-orange-500/20 ring-2 ring-orange-500/50' : 'bg-stone-900 border border-stone-800'}`}
+                                  aria-label={ic}
+                                >
+                                  <Ic size={14} aria-hidden="true" />
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <div className="flex gap-1 flex-wrap">
+                            {COLOR_OPTIONS.map(c => (
+                              <button
+                                key={c}
+                                onClick={() => updateDay(dk, { color: c })}
+                                className={`w-6 h-6 rounded-md bg-gradient-to-br ${c} ${day.color === c ? 'ring-2 ring-white/80' : 'opacity-60 hover:opacity-100'}`}
+                                aria-label={c}
+                              />
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Ejercicios */}
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div className="text-[10px] text-stone-500 font-bold tracking-[0.2em]">EJERCICIOS</div>
+                            <button onClick={() => addExercise(dk)} className="text-[10px] font-bold tracking-wider text-cta-400 flex items-center gap-1 min-h-[28px]">
+                              <Plus size={10} aria-hidden="true" />AÑADIR
+                            </button>
+                          </div>
+                          {day.exercises.map((ex, i) => (
+                            <ExerciseRow
+                              key={i}
+                              exercise={ex}
+                              onChange={(patch) => updateExercise(dk, i, patch)}
+                              onRemove={() => removeExercise(dk, i)}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ExerciseRow({ exercise, onChange, onRemove }) {
+  return (
+    <div className="bg-stone-900 border border-stone-800 rounded-xl p-3 space-y-2">
+      <div className="flex gap-2">
+        <input
+          value={exercise.name}
+          onChange={e => onChange({ name: e.target.value })}
+          placeholder="Nombre del ejercicio"
+          maxLength={60}
+          className="flex-1 bg-stone-950 border border-stone-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-orange-500"
+        />
+        <button onClick={onRemove} className="tap rounded-lg text-stone-500 hover:text-red-400 hover:bg-stone-800" aria-label="Eliminar ejercicio">
+          <Trash2 size={14} aria-hidden="true" />
+        </button>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <LabeledInput label="Series" value={exercise.sets} onChange={v => onChange({ sets: v })} placeholder="4" />
+        <LabeledInput label="Reps" value={exercise.reps} onChange={v => onChange({ reps: v })} placeholder="8-10" />
+        <LabeledInput
+          label="Desc (s)"
+          value={exercise.rest}
+          onChange={v => {
+            const n = parseInt(v) || 0;
+            onChange({ rest: Math.max(0, Math.min(REST_MAX, n)) });
+          }}
+          type="number"
+          max={REST_MAX}
+          inputMode="numeric"
+        />
+      </div>
+      <div className="flex items-center gap-3">
+        <label className="flex items-center gap-2 text-xs text-stone-400 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={!!exercise.trackWeight}
+            onChange={e => onChange({ trackWeight: e.target.checked })}
+            className="accent-orange-500 w-4 h-4"
+          />
+          Registra peso
+        </label>
+        <input
+          value={exercise.note || ''}
+          onChange={e => onChange({ note: e.target.value })}
+          placeholder="Nota / tip (opcional)"
+          maxLength={80}
+          className="flex-1 bg-stone-950 border border-stone-800 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:border-orange-500"
+        />
+      </div>
+    </div>
+  );
+}
+
+function LabeledInput({ label, value, onChange, placeholder, type = 'text', max, inputMode }) {
+  return (
+    <label className="block">
+      <div className="text-[9px] text-stone-500 font-bold tracking-widest mb-1">{label.toUpperCase()}</div>
+      <input
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        type={type}
+        max={max}
+        inputMode={inputMode}
+        className="w-full bg-stone-950 border border-stone-800 rounded-lg px-2.5 py-1.5 text-sm text-center focus:outline-none focus:border-orange-500"
+      />
+    </label>
   );
 }
