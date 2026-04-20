@@ -54,6 +54,12 @@ export function emptyProfile(name, routineId) {
       activity: 1.55,   // factor actividad (por defecto: moderado)
       measurements: [], // [{ week, date, weight, bodyFat? }]
     },
+    // Música (Spotify embed) — opcional
+    music: {
+      enabled: false,
+      playlistUrl: '',           // URL o URI de Spotify
+      autoplayOnStart: true,     // reproducir al tocar HOY / expandir día
+    },
   };
 }
 

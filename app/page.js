@@ -6,7 +6,7 @@ import {
   Info, Timer, Play, Pause, X, Plus, Minus, Dumbbell, Home, BarChart3, User,
   LogOut, Download, Upload, ArrowRight, Calendar, Activity, Settings, Sparkles,
   Lightbulb, CalendarPlus, Edit3, Copy, Trash2, Scale, Ruler, Heart, Flame as FlameIcon,
-  GripVertical, Save, ChevronRight, Circle,
+  GripVertical, Save, ChevronRight, Circle, Music, Music2, ExternalLink, MoreVertical,
 } from 'lucide-react';
 import { ROUTINES, ROUTINE_LIST } from './data/routines';
 import { loadRoot, saveRoot, emptyProfile } from './lib/storage';
@@ -14,6 +14,7 @@ import {
   bmi, bmiCategory, bodyFatPercent, bodyFatCategory, bmr, maintenance,
   idealWeight, leanMass, ffmi, ACTIVITY_LEVELS,
 } from './lib/bodyMetrics';
+import { parseSpotify, toEmbedUrl, toOpenUrl, describe as describeMusic, isValid as isValidMusic } from './lib/spotify';
 
 // Mapeo nombre → componente icon
 const ICONS = { Zap, Flame, Target, Dumbbell, Trophy, Activity };
@@ -41,6 +42,8 @@ export default function App() {
   const [bodyEditorOpen, setBodyEditorOpen] = useState(false);
   const [measurementModalOpen, setMeasurementModalOpen] = useState(false);
   const [routineEditor, setRoutineEditor] = useState(null); // { mode: 'create'|'edit'|'duplicate', routine? }
+  const [musicEditorOpen, setMusicEditorOpen] = useState(false);
+  const [musicActive, setMusicActive] = useState(false); // abre el reproductor Spotify
 
   // Carga inicial
   useEffect(() => {
@@ -207,6 +210,23 @@ export default function App() {
     });
   };
 
+  // Music ─────────────────────────────────────────────
+  const saveMusic = (data) => {
+    updateProfile(p => {
+      p.music = { ...(p.music || {}), ...data };
+      return p;
+    });
+  };
+
+  // Se llama cuando el usuario inicia un entrenamiento (tap HOY, expandir día).
+  // Debe llamarse DIRECTAMENTE desde el onClick para que el gesto habilite autoplay.
+  const triggerMusicIfAuto = () => {
+    const m = profile?.music;
+    if (m?.enabled && m?.autoplayOnStart && isValidMusic(m.playlistUrl)) {
+      setMusicActive(true);
+    }
+  };
+
   // Custom routines ───────────────────────────────────
   const saveCustomRoutine = (routineObj) => {
     updateProfile(p => {
@@ -319,11 +339,18 @@ export default function App() {
           totalDays={dayKeys.length}
           totalProgress={totalProgress}
           totalExercises={totalExercises}
-          onStartDay={(dk) => { setExpandedDay(dk); setView('workout'); }}
+          onStartDay={(dk) => {
+            triggerMusicIfAuto();
+            setExpandedDay(dk);
+            setView('workout');
+          }}
           onResetWeek={resetWeek}
           onChangeRoutine={() => setView('profile')}
           getDayProgress={getDayProgress}
           isDayComplete={isDayComplete}
+          onToggleMusic={() => setMusicActive(a => !a)}
+          musicActive={musicActive}
+          musicConfigured={!!profile.music?.enabled && isValidMusic(profile.music?.playlistUrl)}
         />
       )}
 
@@ -332,7 +359,11 @@ export default function App() {
           profile={profile}
           routine={routine}
           expandedDay={expandedDay}
-          setExpandedDay={setExpandedDay}
+          setExpandedDay={(dk) => {
+            // Si abre un día (no colapsar) y hay música configurada, dispara autoplay
+            if (dk && dk !== expandedDay) triggerMusicIfAuto();
+            setExpandedDay(dk);
+          }}
           showInfo={showInfo}
           setShowInfo={setShowInfo}
           onToggleCheck={toggleCheck}
@@ -342,6 +373,9 @@ export default function App() {
           isDayComplete={isDayComplete}
           onResetWeek={resetWeek}
           weekPercent={weekPercent}
+          onToggleMusic={() => setMusicActive(a => !a)}
+          musicActive={musicActive}
+          musicConfigured={!!profile.music?.enabled && isValidMusic(profile.music?.playlistUrl)}
         />
       )}
 
@@ -363,6 +397,7 @@ export default function App() {
           onOpenMeasurementModal={() => setMeasurementModalOpen(true)}
           onOpenRoutineEditor={(mode, r) => setRoutineEditor({ mode, routine: r })}
           onDeleteCustomRoutine={deleteCustomRoutine}
+          onOpenMusicEditor={() => setMusicEditorOpen(true)}
         />
       )}
 
@@ -399,6 +434,23 @@ export default function App() {
           profile={profile}
           onSave={(data) => { saveMeasurement(data); setMeasurementModalOpen(false); }}
           onClose={() => setMeasurementModalOpen(false)}
+        />
+      )}
+
+      {/* Music editor */}
+      {musicEditorOpen && (
+        <MusicEditorModal
+          music={profile.music || {}}
+          onSave={(data) => { saveMusic(data); setMusicEditorOpen(false); }}
+          onClose={() => setMusicEditorOpen(false)}
+        />
+      )}
+
+      {/* Spotify embed player */}
+      {musicActive && profile.music?.playlistUrl && isValidMusic(profile.music.playlistUrl) && (
+        <SpotifyPlayer
+          playlistUrl={profile.music.playlistUrl}
+          onClose={() => setMusicActive(false)}
         />
       )}
 
@@ -564,7 +616,7 @@ function WelcomeScreen({ root, onCreate, onSelect, onDelete }) {
 }
 
 /* ─────────────────────── HOME VIEW ─────────────────────── */
-function HomeView({ profile, routine, weekPercent, daysCompleted, totalDays, totalProgress, totalExercises, onStartDay, onResetWeek, onChangeRoutine, getDayProgress, isDayComplete }) {
+function HomeView({ profile, routine, weekPercent, daysCompleted, totalDays, totalProgress, totalExercises, onStartDay, onResetWeek, onChangeRoutine, getDayProgress, isDayComplete, onToggleMusic, musicActive, musicConfigured }) {
   const dayKeys = Object.keys(routine.days);
   const nextDay = dayKeys.find(dk => !isDayComplete(dk)) || dayKeys[0];
   const RoutineIcon = IconOf(routine.icon);
@@ -583,16 +635,28 @@ function HomeView({ profile, routine, weekPercent, daysCompleted, totalDays, tot
                 {profile.name}
               </h1>
             </div>
-            <button
-              onClick={onResetWeek}
-              className="flex items-center gap-2 px-3.5 py-2.5 rounded-full bg-stone-800 hover:bg-stone-700 transition-colors border border-stone-700 flex-shrink-0 min-h-[44px]"
-              aria-label="Empezar nueva semana"
-              title="Nueva semana"
-            >
-              <CalendarPlus size={16} aria-hidden="true" />
-              <span className="text-xs font-bold tracking-wider hidden sm:inline">NUEVA SEMANA</span>
-              <span className="text-xs font-bold tracking-wider sm:hidden">NUEVA</span>
-            </button>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {musicConfigured && (
+                <button
+                  onClick={onToggleMusic}
+                  className={`flex items-center gap-1.5 px-3 py-2.5 rounded-full transition-colors border min-h-[44px] ${musicActive ? 'bg-cta-500/20 border-cta-500/50 text-cta-300 animate-pulseGlowCta' : 'bg-stone-800 hover:bg-stone-700 border-stone-700'}`}
+                  aria-label={musicActive ? 'Ocultar reproductor' : 'Mostrar reproductor'}
+                  title="Spotify"
+                >
+                  <Music2 size={16} aria-hidden="true" className={musicActive ? 'text-cta-400' : ''} />
+                </button>
+              )}
+              <button
+                onClick={onResetWeek}
+                className="flex items-center gap-2 px-3.5 py-2.5 rounded-full bg-stone-800 hover:bg-stone-700 transition-colors border border-stone-700 min-h-[44px]"
+                aria-label="Empezar nueva semana"
+                title="Nueva semana"
+              >
+                <CalendarPlus size={16} aria-hidden="true" />
+                <span className="text-xs font-bold tracking-wider hidden sm:inline">NUEVA SEMANA</span>
+                <span className="text-xs font-bold tracking-wider sm:hidden">NUEVA</span>
+              </button>
+            </div>
           </div>
 
           <button
@@ -731,7 +795,7 @@ function StatCard({ label, value, unit, icon: Icon, iconColor = 'text-stone-400'
 }
 
 /* ─────────────────────── WORKOUT VIEW ─────────────────────── */
-function WorkoutView({ profile, routine, expandedDay, setExpandedDay, showInfo, setShowInfo, onToggleCheck, onOpenWeight, onStartTimer, getDayProgress, isDayComplete, onResetWeek, weekPercent }) {
+function WorkoutView({ profile, routine, expandedDay, setExpandedDay, showInfo, setShowInfo, onToggleCheck, onOpenWeight, onStartTimer, getDayProgress, isDayComplete, onResetWeek, weekPercent, onToggleMusic, musicActive, musicConfigured }) {
   const dayKeys = Object.keys(routine.days);
   const RoutineIcon = IconOf(routine.icon);
 
@@ -750,14 +814,26 @@ function WorkoutView({ profile, routine, expandedDay, setExpandedDay, showInfo, 
                 <div className="font-display text-xl font-black uppercase tracking-tight truncate">{routine.name}</div>
               </div>
             </div>
-            <button
-              onClick={onResetWeek}
-              className="flex items-center gap-2 px-3 py-2 rounded-full bg-stone-800 hover:bg-stone-700 border border-stone-700 flex-shrink-0 min-h-[44px]"
-              aria-label="Empezar nueva semana"
-            >
-              <CalendarPlus size={14} aria-hidden="true" />
-              <span className="text-[11px] font-bold tracking-wider hidden sm:inline">NUEVA</span>
-            </button>
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              {musicConfigured && (
+                <button
+                  onClick={onToggleMusic}
+                  className={`tap rounded-full border transition-colors min-h-[44px] ${musicActive ? 'bg-cta-500/20 border-cta-500/50 text-cta-300' : 'bg-stone-800 hover:bg-stone-700 border-stone-700'}`}
+                  aria-label={musicActive ? 'Ocultar música' : 'Mostrar música'}
+                  title="Spotify"
+                >
+                  <Music2 size={14} aria-hidden="true" />
+                </button>
+              )}
+              <button
+                onClick={onResetWeek}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-full bg-stone-800 hover:bg-stone-700 border border-stone-700 min-h-[44px]"
+                aria-label="Empezar nueva semana"
+              >
+                <CalendarPlus size={14} aria-hidden="true" />
+                <span className="text-[11px] font-bold tracking-wider hidden sm:inline">NUEVA</span>
+              </button>
+            </div>
           </div>
           <div className="h-2 bg-stone-800 rounded-full overflow-hidden" role="progressbar" aria-valuenow={Math.round(weekPercent)} aria-valuemin="0" aria-valuemax="100">
             <div
@@ -1104,7 +1180,7 @@ function MiniChart({ history }) {
 }
 
 /* ─────────────────────── PROFILE VIEW ─────────────────────── */
-function ProfileView({ profile, root, allRoutines, onSwitchRoutine, onSwitchProfile, onDeleteProfile, onLogout, onNewProfile, onOpenBodyEditor, onOpenMeasurementModal, onOpenRoutineEditor, onDeleteCustomRoutine }) {
+function ProfileView({ profile, root, allRoutines, onSwitchRoutine, onSwitchProfile, onDeleteProfile, onLogout, onNewProfile, onOpenBodyEditor, onOpenMeasurementModal, onOpenRoutineEditor, onDeleteCustomRoutine, onOpenMusicEditor }) {
   const profiles = Object.values(root.profiles);
   const currentRoutineId = profile.routineId;
   const body = profile.body || {};
@@ -1308,78 +1384,45 @@ function ProfileView({ profile, root, allRoutines, onSwitchRoutine, onSwitchProf
           )}
         </section>
 
+        {/* ── MÚSICA (Spotify) ─────────────────────── */}
+        <section>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-xs font-bold tracking-[0.25em] text-stone-500">MÚSICA · SPOTIFY</h2>
+            <button
+              onClick={onOpenMusicEditor}
+              className="text-[11px] font-bold tracking-wider text-cta-400 hover:text-cta-300 flex items-center gap-1 min-h-[32px]"
+            >
+              <Edit3 size={12} aria-hidden="true" />CONFIGURAR
+            </button>
+          </div>
+          <MusicSummary music={profile.music} onOpen={onOpenMusicEditor} />
+        </section>
+
         {/* ── RUTINAS ──────────────────────────────── */}
         <section>
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-xs font-bold tracking-[0.25em] text-stone-500">CAMBIAR RUTINA</h2>
             <button
               onClick={() => onOpenRoutineEditor('create')}
-              className="text-[11px] font-bold tracking-wider text-cta-400 hover:text-cta-300 flex items-center gap-1 min-h-[32px]"
+              className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-cta-500/15 border border-cta-500/40 text-cta-300 hover:bg-cta-500/25 min-h-[36px]"
+              aria-label="Crear nueva rutina"
             >
-              <Plus size={12} aria-hidden="true" />CREAR
+              <Plus size={14} aria-hidden="true" />
+              <span className="text-[11px] font-bold tracking-wider">CREAR</span>
             </button>
           </div>
-          <div className="grid gap-2 stagger">
-            {allRoutines.map(r => {
-              const Icon = IconOf(r.icon);
-              const current = r.id === currentRoutineId;
-              const isCustom = !ROUTINES[r.id];
-              return (
-                <div
-                  key={r.id}
-                  className={`text-left p-3 rounded-2xl border flex items-center gap-3 transition-all ${
-                    current
-                      ? 'bg-stone-900 border-orange-500/50 ring-2 ring-orange-500/20'
-                      : 'bg-stone-900 border-stone-800 hover:border-stone-700'
-                  }`}
-                >
-                  <button
-                    onClick={() => !current && onSwitchRoutine(r.id)}
-                    disabled={current}
-                    className="flex items-center gap-3 flex-1 min-w-0 text-left"
-                    aria-label={current ? `Rutina activa: ${r.name}` : `Activar rutina ${r.name}`}
-                  >
-                    <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${r.accent} flex items-center justify-center flex-shrink-0`}>
-                      <Icon size={18} aria-hidden="true" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="font-bold text-sm truncate flex items-center gap-2">
-                        {r.name}
-                        {isCustom && (
-                          <span className="text-[9px] bg-cta-500/20 text-cta-300 px-1.5 py-0.5 rounded-full font-bold tracking-widest">MÍA</span>
-                        )}
-                      </div>
-                      <div className="text-xs text-stone-500 truncate">{r.description}</div>
-                      <div className="text-[10px] text-stone-600 mt-0.5">{r.level} · {r.daysPerWeek} días/sem</div>
-                    </div>
-                    {current && (
-                      <div className="text-[10px] bg-orange-500/20 text-orange-300 px-2 py-1 rounded-full font-bold tracking-wider flex-shrink-0">
-                        ACTUAL
-                      </div>
-                    )}
-                  </button>
-                  <div className="flex gap-0.5 flex-shrink-0">
-                    <button
-                      onClick={() => onOpenRoutineEditor(isCustom ? 'edit' : 'duplicate', r)}
-                      className="tap rounded-lg text-stone-500 hover:text-orange-400 hover:bg-stone-800"
-                      aria-label={isCustom ? `Editar ${r.name}` : `Duplicar y editar ${r.name}`}
-                      title={isCustom ? 'Editar' : 'Duplicar para editar'}
-                    >
-                      {isCustom ? <Edit3 size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
-                    </button>
-                    {isCustom && (
-                      <button
-                        onClick={() => onDeleteCustomRoutine(r.id)}
-                        className="tap rounded-lg text-stone-500 hover:text-red-400 hover:bg-stone-800"
-                        aria-label={`Eliminar ${r.name}`}
-                      >
-                        <Trash2 size={14} aria-hidden="true" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+          <div className="grid gap-2.5 stagger">
+            {allRoutines.map(r => (
+              <RoutineCard
+                key={r.id}
+                routine={r}
+                isCurrent={r.id === currentRoutineId}
+                isCustom={!ROUTINES[r.id]}
+                onSelect={() => onSwitchRoutine(r.id)}
+                onEdit={() => onOpenRoutineEditor(ROUTINES[r.id] ? 'duplicate' : 'edit', r)}
+                onDelete={!ROUTINES[r.id] ? () => onDeleteCustomRoutine(r.id) : null}
+              />
+            ))}
           </div>
         </section>
 
@@ -2416,5 +2459,282 @@ function LabeledInput({ label, value, onChange, placeholder, type = 'text', max,
         className="w-full bg-stone-950 border border-stone-800 rounded-lg px-2.5 py-1.5 text-sm text-center focus:outline-none focus:border-orange-500"
       />
     </label>
+  );
+}
+
+/* ─────────────────────── ROUTINE CARD (mobile-first) ─────────────────────── */
+
+function RoutineCard({ routine, isCurrent, isCustom, onSelect, onEdit, onDelete }) {
+  const Icon = IconOf(routine.icon);
+  return (
+    <div
+      className={`rounded-2xl border transition-colors overflow-hidden ${
+        isCurrent ? 'bg-stone-900 border-orange-500/60 ring-2 ring-orange-500/20' : 'bg-stone-900 border-stone-800 hover:border-stone-700'
+      }`}
+    >
+      {/* Fila principal — tap-target grande, layout claro */}
+      <button
+        onClick={isCurrent ? undefined : onSelect}
+        disabled={isCurrent}
+        className="w-full text-left p-4 flex items-start gap-3 disabled:cursor-default"
+        aria-label={isCurrent ? `Rutina activa: ${routine.name}` : `Activar rutina ${routine.name}`}
+      >
+        <div className={`w-11 h-11 rounded-xl bg-gradient-to-br ${routine.accent} flex items-center justify-center flex-shrink-0 shadow-lg`}>
+          <Icon size={20} aria-hidden="true" className="text-white" />
+        </div>
+        <div className="flex-1 min-w-0">
+          {/* Nombre + pills — envuelve en mobile */}
+          <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+            <span className="font-bold text-base leading-tight">{routine.name}</span>
+            {isCustom && (
+              <span className="text-[9px] bg-cta-500/20 text-cta-300 px-1.5 py-0.5 rounded-full font-bold tracking-widest whitespace-nowrap">MÍA</span>
+            )}
+            {isCurrent && (
+              <span className="text-[9px] bg-orange-500/20 text-orange-300 px-1.5 py-0.5 rounded-full font-bold tracking-widest whitespace-nowrap">ACTIVA</span>
+            )}
+          </div>
+          <div className="text-xs text-stone-400 line-clamp-2 mb-1">{routine.description || routine.tagline}</div>
+          <div className="text-[10px] text-stone-500 flex items-center gap-1.5">
+            <span className="stat-number">{routine.daysPerWeek}</span>
+            <span>días/sem</span>
+            <span className="text-stone-700">·</span>
+            <span>{routine.level}</span>
+          </div>
+        </div>
+      </button>
+
+      {/* Barra de acciones — siempre accesible, separada por borde */}
+      <div className="border-t border-stone-800 grid grid-cols-2 divide-x divide-stone-800">
+        {!isCurrent && (
+          <button
+            onClick={onSelect}
+            className="py-3 flex items-center justify-center gap-1.5 text-[11px] font-bold tracking-wider text-orange-400 hover:bg-stone-800/50 transition-colors min-h-[44px]"
+            aria-label={`Usar ${routine.name}`}
+          >
+            <Play size={12} aria-hidden="true" fill="currentColor" />
+            USAR
+          </button>
+        )}
+        <button
+          onClick={onEdit}
+          className={`py-3 flex items-center justify-center gap-1.5 text-[11px] font-bold tracking-wider hover:bg-stone-800/50 transition-colors min-h-[44px] ${isCurrent ? 'col-span-1' : ''} text-stone-300`}
+          aria-label={isCustom ? `Editar ${routine.name}` : `Duplicar y editar ${routine.name}`}
+        >
+          {isCustom ? <><Edit3 size={12} aria-hidden="true" />EDITAR</> : <><Copy size={12} aria-hidden="true" />DUPLICAR</>}
+        </button>
+        {onDelete && (
+          <button
+            onClick={onDelete}
+            className={`py-3 flex items-center justify-center gap-1.5 text-[11px] font-bold tracking-wider text-red-400 hover:bg-red-500/10 transition-colors min-h-[44px] ${isCurrent ? 'col-span-1' : 'col-span-2 border-t border-stone-800'}`}
+            aria-label={`Eliminar ${routine.name}`}
+          >
+            <Trash2 size={12} aria-hidden="true" />
+            ELIMINAR
+          </button>
+        )}
+        {isCurrent && !onDelete && (
+          <div className="py-3 flex items-center justify-center gap-1.5 text-[11px] font-bold tracking-wider text-stone-600 min-h-[44px]">
+            <Check size={12} aria-hidden="true" />EN USO
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────── MUSIC ─────────────────────── */
+
+function MusicSummary({ music, onOpen }) {
+  const parsed = music?.playlistUrl ? parseSpotify(music.playlistUrl) : null;
+  const enabled = !!music?.enabled;
+
+  if (!parsed || !enabled) {
+    return (
+      <button
+        onClick={onOpen}
+        className="w-full text-left bg-stone-900 border border-dashed border-stone-700 rounded-2xl p-4 hover:border-cta-500/50 transition-colors flex items-center gap-3"
+      >
+        <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-cta-500 to-emerald-600 flex items-center justify-center flex-shrink-0">
+          <Music2 size={20} aria-hidden="true" className="text-white" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-bold text-sm">Conecta Spotify</div>
+          <div className="text-xs text-stone-500">Pega una playlist y se reproduce al iniciar</div>
+        </div>
+        <ChevronRight size={16} className="text-stone-600 flex-shrink-0" aria-hidden="true" />
+      </button>
+    );
+  }
+
+  return (
+    <div className="bg-stone-900 border border-cta-500/30 rounded-2xl p-4 flex items-center gap-3 animate-fadeIn">
+      <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-cta-500 to-emerald-600 flex items-center justify-center flex-shrink-0">
+        <Music2 size={20} aria-hidden="true" className="text-white" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="font-bold text-sm">{describeMusic(parsed)}</div>
+        <div className="text-xs text-stone-500 truncate">
+          {music.autoplayOnStart ? 'Autoplay al iniciar entrenamiento' : 'Manual'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MusicEditorModal({ music, onSave, onClose }) {
+  const [url, setUrl] = useState(music?.playlistUrl || '');
+  const [enabled, setEnabled] = useState(music?.enabled !== false);
+  const [autoplay, setAutoplay] = useState(music?.autoplayOnStart !== false);
+  const parsed = parseSpotify(url);
+  const valid = !url || parsed != null;
+
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => { document.body.style.overflow = prev; window.removeEventListener('keydown', onKey); };
+  }, [onClose]);
+
+  const save = () => {
+    onSave({
+      playlistUrl: url.trim(),
+      enabled: enabled && !!parsed,
+      autoplayOnStart: autoplay,
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4 animate-fadeIn" onClick={onClose} role="dialog" aria-modal="true" aria-labelledby="music-title">
+      <div className="bg-stone-900 border border-stone-800 rounded-3xl w-full max-w-md max-h-[90vh] overflow-y-auto animate-slideUp" onClick={e => e.stopPropagation()}>
+        <div className="sticky top-0 bg-stone-900 border-b border-stone-800 p-5 flex items-center justify-between z-10">
+          <div>
+            <div className="text-[11px] text-cta-400 font-bold tracking-[0.25em] mb-1">OPCIONAL</div>
+            <h3 id="music-title" className="font-display text-xl font-black uppercase flex items-center gap-2">
+              <Music2 size={20} aria-hidden="true" className="text-cta-400" />
+              Música Spotify
+            </h3>
+          </div>
+          <button onClick={onClose} className="tap rounded-full hover:bg-stone-800" aria-label="Cerrar">
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+        <div className="p-5 space-y-5">
+          <div className="text-xs text-stone-400 leading-relaxed">
+            Pega el link de tu playlist (o álbum/canción) de Spotify. Al iniciar un entrenamiento, se abrirá un mini reproductor integrado. Funciona mejor con cuenta <strong className="text-stone-200">Spotify Premium</strong> — sin Premium escucharás previews de 30 s.
+          </div>
+
+          <div>
+            <label htmlFor="sp-url" className="block text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-2">LINK DE SPOTIFY</label>
+            <input
+              id="sp-url" type="url" value={url}
+              onChange={e => setUrl(e.target.value)}
+              placeholder="https://open.spotify.com/playlist/…"
+              className={`w-full bg-stone-950 border rounded-xl px-4 py-3 focus:outline-none ${valid ? 'border-stone-800 focus:border-cta-500' : 'border-red-500/60'}`}
+            />
+            {url && !parsed && (
+              <div className="text-[11px] text-red-400 mt-2">No reconozco este link. Copia desde Spotify → Compartir → Copiar link.</div>
+            )}
+            {parsed && (
+              <div className="text-[11px] text-cta-400 mt-2 flex items-center gap-1"><Check size={12} aria-hidden="true" />{describeMusic(parsed)}</div>
+            )}
+          </div>
+
+          <label className="flex items-center justify-between gap-3 bg-stone-950 border border-stone-800 rounded-xl p-3 cursor-pointer min-h-[56px]">
+            <div className="min-w-0">
+              <div className="font-bold text-sm">Activar música</div>
+              <div className="text-[11px] text-stone-500">Muestra el botón Spotify en la app</div>
+            </div>
+            <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} className="accent-cta-500 w-5 h-5 flex-shrink-0" />
+          </label>
+
+          <label className={`flex items-center justify-between gap-3 bg-stone-950 border border-stone-800 rounded-xl p-3 cursor-pointer min-h-[56px] ${!enabled ? 'opacity-50' : ''}`}>
+            <div className="min-w-0">
+              <div className="font-bold text-sm">Autoplay al iniciar</div>
+              <div className="text-[11px] text-stone-500">Se abre cuando tocas HOY o abres un día</div>
+            </div>
+            <input type="checkbox" checked={autoplay} disabled={!enabled} onChange={e => setAutoplay(e.target.checked)} className="accent-cta-500 w-5 h-5 flex-shrink-0" />
+          </label>
+
+          {parsed && (
+            <a
+              href={toOpenUrl(parsed)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl border border-stone-800 hover:border-stone-700 text-sm text-stone-300 transition-colors min-h-[44px]"
+            >
+              <ExternalLink size={14} aria-hidden="true" />
+              Abrir en Spotify
+            </a>
+          )}
+
+          <button
+            onClick={save}
+            disabled={url && !parsed}
+            className="btn-cta w-full py-3 rounded-xl font-bold text-white shadow-lg disabled:opacity-40 text-base flex items-center justify-center gap-2"
+          >
+            <Save size={16} aria-hidden="true" />
+            Guardar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────── SPOTIFY PLAYER (embed) ─────────────────────── */
+
+function SpotifyPlayer({ playlistUrl, onClose }) {
+  const parsed = parseSpotify(playlistUrl);
+  const [minimized, setMinimized] = useState(false);
+  const embedUrl = toEmbedUrl(parsed);
+
+  if (!embedUrl) return null;
+
+  // Altura del iframe: 152px para compacto, 352px para modo grande
+  const height = minimized ? 80 : 152;
+
+  return (
+    <div
+      className="fixed left-3 right-3 max-w-xl mx-auto z-40 animate-slideUp"
+      style={{ bottom: 'calc(env(safe-area-inset-bottom) + 4.5rem)' }}
+    >
+      <div className="bg-stone-900 border border-cta-500/40 rounded-2xl shadow-2xl overflow-hidden">
+        <div className="flex items-center justify-between px-3 py-1.5 bg-stone-950 border-b border-stone-800">
+          <div className="flex items-center gap-2 text-[11px] text-stone-400 min-w-0">
+            <Music2 size={12} className="text-cta-400 flex-shrink-0" aria-hidden="true" />
+            <span className="font-bold tracking-wider truncate">SPOTIFY · {parsed.type.toUpperCase()}</span>
+          </div>
+          <div className="flex items-center gap-0.5 flex-shrink-0">
+            <button
+              onClick={() => setMinimized(m => !m)}
+              className="tap rounded-lg text-stone-500 hover:text-stone-300"
+              aria-label={minimized ? 'Expandir' : 'Minimizar'}
+              style={{ minHeight: 32, minWidth: 32 }}
+            >
+              {minimized ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+            </button>
+            <button
+              onClick={onClose}
+              className="tap rounded-lg text-stone-500 hover:text-red-400"
+              aria-label="Cerrar reproductor"
+              style={{ minHeight: 32, minWidth: 32 }}
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+        <iframe
+          title="Reproductor de Spotify"
+          src={embedUrl}
+          width="100%"
+          height={height}
+          frameBorder="0"
+          allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+          loading="lazy"
+          style={{ display: 'block', border: 0 }}
+        />
+      </div>
+    </div>
   );
 }
