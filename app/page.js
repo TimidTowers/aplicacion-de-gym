@@ -7,6 +7,7 @@ import {
   LogOut, Download, Upload, ArrowRight, Calendar, Activity, Settings, Sparkles,
   Lightbulb, CalendarPlus, Edit3, Copy, Trash2, Scale, Ruler, Heart, Flame as FlameIcon,
   GripVertical, Save, ChevronRight, Circle, Music, Music2, ExternalLink, MoreVertical,
+  SkipBack, SkipForward, Link as LinkIcon, RefreshCw, AlertTriangle,
 } from 'lucide-react';
 import { ROUTINES, ROUTINE_LIST } from './data/routines';
 import { loadRoot, saveRoot, emptyProfile } from './lib/storage';
@@ -14,7 +15,9 @@ import {
   bmi, bmiCategory, bodyFatPercent, bodyFatCategory, bmr, maintenance,
   idealWeight, leanMass, ffmi, ACTIVITY_LEVELS,
 } from './lib/bodyMetrics';
-import { parseSpotify, toEmbedUrl, toOpenUrl, describe as describeMusic, isValid as isValidMusic } from './lib/spotify';
+import { parseSpotify, toEmbedUrl, toOpenUrl, toSpotifyUri, describe as describeMusic, isValid as isValidMusic } from './lib/spotify';
+import { startSpotifyAuth, consumeCallback, refreshAccessToken, getMe, getRedirectUri, withFreshToken } from './lib/spotifyAuth';
+import * as spApi from './lib/spotifyApi';
 
 // Mapeo nombre → componente icon
 const ICONS = { Zap, Flame, Target, Dumbbell, Trophy, Activity };
@@ -45,10 +48,50 @@ export default function App() {
   const [musicEditorOpen, setMusicEditorOpen] = useState(false);
   const [musicActive, setMusicActive] = useState(false); // abre el reproductor Spotify
 
-  // Carga inicial
+  const [authError, setAuthError] = useState(null);
+
+  // Carga inicial + consumo del callback OAuth de Spotify (si venimos de auth)
   useEffect(() => {
-    setRoot(loadRoot());
+    const loaded = loadRoot();
+    setRoot(loaded);
     setMounted(true);
+    // ¿Volvimos de Spotify auth?
+    (async () => {
+      try {
+        const profileName = loaded.currentProfile;
+        const profile = profileName ? loaded.profiles[profileName] : null;
+        const clientId = profile?.music?.clientId;
+        if (!clientId) return;
+        const token = await consumeCallback(clientId);
+        if (!token) return;
+        // Obtener perfil de Spotify
+        const me = await getMe(token.access_token);
+        const oauth = {
+          accessToken: token.access_token,
+          refreshToken: token.refresh_token,
+          expiresAt: Date.now() + (token.expires_in || 3600) * 1000,
+          displayName: me.display_name || me.id,
+          product: me.product,
+          email: me.email,
+          userId: me.id,
+        };
+        const updated = {
+          ...loaded,
+          profiles: {
+            ...loaded.profiles,
+            [profileName]: {
+              ...profile,
+              music: { ...(profile.music || {}), oauth, enabled: true },
+            },
+          },
+        };
+        setRoot(updated);
+        saveRoot(updated);
+      } catch (e) {
+        console.error('Spotify auth error', e);
+        setAuthError(e.message || 'Error al conectar con Spotify');
+      }
+    })();
   }, []);
 
   const persist = (next) => { setRoot(next); saveRoot(next); };
@@ -214,6 +257,31 @@ export default function App() {
   const saveMusic = (data) => {
     updateProfile(p => {
       p.music = { ...(p.music || {}), ...data };
+      return p;
+    });
+  };
+
+  const connectSpotify = async (clientId) => {
+    // Guardamos el clientId ANTES de redirigir (lo leemos al volver)
+    updateProfile(p => {
+      p.music = { ...(p.music || {}), clientId };
+      return p;
+    });
+    // Pequeño delay para asegurar que persist termine antes del redirect
+    setTimeout(() => startSpotifyAuth(clientId).catch(err => setAuthError(err.message)), 100);
+  };
+
+  const disconnectSpotify = () => {
+    updateProfile(p => {
+      p.music = { ...(p.music || {}), oauth: null };
+      return p;
+    });
+  };
+
+  // Actualiza el oauth del perfil (se usa después de refrescar token)
+  const updateOauth = (oauth) => {
+    updateProfile(p => {
+      p.music = { ...(p.music || {}), oauth };
       return p;
     });
   };
@@ -441,17 +509,36 @@ export default function App() {
       {musicEditorOpen && (
         <MusicEditorModal
           music={profile.music || {}}
+          redirectUri={typeof window !== 'undefined' ? getRedirectUri() : ''}
           onSave={(data) => { saveMusic(data); setMusicEditorOpen(false); }}
+          onConnect={connectSpotify}
+          onDisconnect={disconnectSpotify}
           onClose={() => setMusicEditorOpen(false)}
         />
       )}
 
-      {/* Spotify embed player */}
+      {/* Error de auth */}
+      {authError && (
+        <AuthErrorToast message={authError} onDismiss={() => setAuthError(null)} />
+      )}
+
+      {/* Reproductor — Premium si hay oauth, si no embed (30s previews) */}
       {musicActive && profile.music?.playlistUrl && isValidMusic(profile.music.playlistUrl) && (
-        <SpotifyPlayer
-          playlistUrl={profile.music.playlistUrl}
-          onClose={() => setMusicActive(false)}
-        />
+        profile.music.oauth?.accessToken
+          ? <SpotifyPremiumPlayer
+              music={profile.music}
+              onUpdateOauth={updateOauth}
+              onClose={() => setMusicActive(false)}
+              onAuthError={() => {
+                setAuthError('Tu sesión de Spotify expiró. Reconéctate.');
+                disconnectSpotify();
+                setMusicActive(false);
+              }}
+            />
+          : <SpotifyPlayer
+              playlistUrl={profile.music.playlistUrl}
+              onClose={() => setMusicActive(false)}
+            />
       )}
 
       {/* Routine editor */}
@@ -2581,12 +2668,16 @@ function MusicSummary({ music, onOpen }) {
   );
 }
 
-function MusicEditorModal({ music, onSave, onClose }) {
+function MusicEditorModal({ music, redirectUri, onSave, onConnect, onDisconnect, onClose }) {
   const [url, setUrl] = useState(music?.playlistUrl || '');
   const [enabled, setEnabled] = useState(music?.enabled !== false);
   const [autoplay, setAutoplay] = useState(music?.autoplayOnStart !== false);
+  const [clientId, setClientId] = useState(music?.clientId || '');
+  const [showHelp, setShowHelp] = useState(!music?.clientId);
   const parsed = parseSpotify(url);
   const valid = !url || parsed != null;
+  const connected = !!music?.oauth?.accessToken;
+  const isPremium = music?.oauth?.product === 'premium';
 
   useEffect(() => {
     const prev = document.body.style.overflow;
@@ -2620,8 +2711,90 @@ function MusicEditorModal({ music, onSave, onClose }) {
           </button>
         </div>
         <div className="p-5 space-y-5">
+          {/* Estado de conexión */}
+          {connected ? (
+            <div className="bg-cta-500/10 border border-cta-500/40 rounded-2xl p-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-cta-500/20 flex items-center justify-center flex-shrink-0">
+                  <Check size={20} className="text-cta-400" aria-hidden="true" strokeWidth={3} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-bold text-sm truncate">{music.oauth.displayName || 'Conectado'}</div>
+                  <div className="text-[11px] text-stone-400 flex items-center gap-1.5 flex-wrap">
+                    <span className={`px-1.5 py-0.5 rounded font-bold tracking-wider ${isPremium ? 'bg-cta-500/20 text-cta-300' : 'bg-yellow-500/20 text-yellow-300'}`}>
+                      {isPremium ? 'PREMIUM' : 'FREE'}
+                    </span>
+                    <span className="truncate">{music.oauth.email}</span>
+                  </div>
+                </div>
+              </div>
+              {!isPremium && (
+                <div className="mt-3 text-[11px] text-yellow-200 bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-2 flex items-start gap-2">
+                  <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" aria-hidden="true" />
+                  <span>Spotify requiere cuenta <strong>Premium</strong> para reproducir desde la API. Con Free la música no arrancará.</span>
+                </div>
+              )}
+              <button
+                onClick={onDisconnect}
+                className="mt-3 w-full py-2 text-[11px] font-bold tracking-wider text-stone-400 hover:text-red-400 border border-stone-800 rounded-lg flex items-center justify-center gap-1.5 min-h-[40px] transition-colors"
+              >
+                <LogOut size={12} aria-hidden="true" />DESCONECTAR
+              </button>
+            </div>
+          ) : (
+            <div className="bg-stone-950 border border-stone-800 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center gap-2 text-xs text-stone-400">
+                <AlertTriangle size={14} className="text-yellow-400 flex-shrink-0" aria-hidden="true" />
+                <span>Para que suenen tus canciones completas (no previews) necesitas conectar tu cuenta <strong className="text-stone-200">Spotify Premium</strong>.</span>
+              </div>
+              <button
+                onClick={() => setShowHelp(s => !s)}
+                className="w-full text-left text-[11px] font-bold tracking-wider text-cta-400 flex items-center gap-1 min-h-[32px]"
+              >
+                {showHelp ? <ChevronUp size={12} aria-hidden="true" /> : <ChevronDown size={12} aria-hidden="true" />}
+                {showHelp ? 'OCULTAR INSTRUCCIONES' : 'CÓMO OBTENER CLIENT ID'}
+              </button>
+              {showHelp && (
+                <ol className="text-[11px] text-stone-400 space-y-1.5 pl-4 list-decimal leading-relaxed">
+                  <li>Entra a <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener noreferrer" className="text-cta-400 underline">developer.spotify.com/dashboard</a> y loguéate con tu cuenta Premium.</li>
+                  <li>Pulsa <strong className="text-stone-200">Create app</strong>.</li>
+                  <li>Nombre: lo que quieras (p.ej. "Mi Gym").</li>
+                  <li>En <strong className="text-stone-200">Redirect URIs</strong> pega exactamente:
+                    <div className="bg-stone-900 border border-stone-700 rounded-lg px-2 py-1.5 mt-1 font-mono text-[10px] break-all select-all text-stone-200">{redirectUri || 'https://plan-tenis.vercel.app/'}</div>
+                  </li>
+                  <li>En <strong className="text-stone-200">Which API/SDKs are you planning to use?</strong> marca <strong className="text-stone-200">Web API</strong>.</li>
+                  <li>Acepta términos → <strong className="text-stone-200">Save</strong>.</li>
+                  <li>En la página del app, copia el <strong className="text-stone-200">Client ID</strong> y pégalo abajo.</li>
+                </ol>
+              )}
+            </div>
+          )}
+
+          {/* Client ID — sólo si no está conectado */}
+          {!connected && (
+            <div>
+              <label htmlFor="sp-client" className="block text-[11px] text-stone-400 font-bold tracking-[0.2em] mb-2">CLIENT ID DE SPOTIFY</label>
+              <input
+                id="sp-client" type="text" value={clientId}
+                onChange={e => setClientId(e.target.value.trim())}
+                placeholder="32 caracteres de hexadecimal"
+                className="w-full bg-stone-950 border border-stone-800 rounded-xl px-4 py-3 font-mono text-sm focus:outline-none focus:border-cta-500"
+              />
+              <button
+                onClick={() => clientId && onConnect(clientId)}
+                disabled={!clientId || clientId.length < 20}
+                className="btn-cta w-full py-3 mt-3 rounded-xl font-bold text-white shadow-lg disabled:opacity-40 flex items-center justify-center gap-2"
+              >
+                <LinkIcon size={16} aria-hidden="true" />
+                Conectar con Spotify
+              </button>
+            </div>
+          )}
+
           <div className="text-xs text-stone-400 leading-relaxed">
-            Pega el link de tu playlist (o álbum/canción) de Spotify. Al iniciar un entrenamiento, se abrirá un mini reproductor integrado. Funciona mejor con cuenta <strong className="text-stone-200">Spotify Premium</strong> — sin Premium escucharás previews de 30 s.
+            Pega el link de tu playlist (o álbum/canción) de Spotify. {connected
+              ? 'Al iniciar un entrenamiento se reproducirá en tu dispositivo Spotify activo.'
+              : 'Sin conectar, sólo podrás escuchar previews de 30 segundos.'}
           </div>
 
           <div>
@@ -2682,7 +2855,233 @@ function MusicEditorModal({ music, onSave, onClose }) {
   );
 }
 
-/* ─────────────────────── SPOTIFY PLAYER (embed) ─────────────────────── */
+/* ─────────────────────── SPOTIFY PREMIUM PLAYER (Connect API) ─────────────────────── */
+// Usa OAuth PKCE para controlar playback en el dispositivo Spotify activo.
+// Funciona en móvil si el usuario tiene Spotify abierto (en cualquier lado).
+
+function SpotifyPremiumPlayer({ music, onUpdateOauth, onClose, onAuthError }) {
+  const [state, setState] = useState(music.oauth); // { accessToken, refreshToken, expiresAt, ... }
+  const [playback, setPlayback] = useState(null);  // Último estado de /me/player
+  const [devices, setDevices] = useState([]);
+  const [status, setStatus] = useState('loading'); // 'loading' | 'playing' | 'paused' | 'error' | 'no-device'
+  const [errorMsg, setErrorMsg] = useState('');
+  const [minimized, setMinimized] = useState(false);
+  const pollRef = useRef(null);
+  const startedRef = useRef(false);
+
+  const parsed = parseSpotify(music.playlistUrl);
+  const contextUri = toSpotifyUri(parsed);
+
+  // Llama a una función con refresh automático del token y persiste el nuevo oauth
+  const withToken = async (fn) => {
+    try {
+      const { state: newState, result } = await withFreshToken(music.clientId, state, fn);
+      if (newState.accessToken !== state.accessToken || newState.expiresAt !== state.expiresAt) {
+        setState(newState);
+        onUpdateOauth({ ...music.oauth, ...newState });
+      }
+      return result;
+    } catch (e) {
+      if (String(e.message).includes('401') || String(e.message).includes('Refresh')) {
+        onAuthError();
+      }
+      throw e;
+    }
+  };
+
+  // Arranque: intenta reproducir la playlist en el dispositivo activo
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    (async () => {
+      try {
+        if (!contextUri) throw new Error('Playlist inválida');
+        setStatus('loading');
+        // 1) Consultar dispositivos
+        const devs = await withToken(t => spApi.getDevices(t));
+        setDevices(devs.devices || []);
+        const active = devs.devices.find(d => d.is_active) || devs.devices[0];
+        if (!active) {
+          setStatus('no-device');
+          setErrorMsg('Abre Spotify en algún dispositivo (móvil, PC, web) y reintenta.');
+          return;
+        }
+        // 2) Reproducir playlist en ese dispositivo
+        await withToken(t => spApi.play(t, { deviceId: active.id, contextUri }));
+        setStatus('playing');
+        // 3) Comenzar polling del estado
+        startPolling();
+      } catch (e) {
+        console.error(e);
+        if (e.code === 'NO_ACTIVE_DEVICE') {
+          setStatus('no-device');
+          setErrorMsg('No hay ningún Spotify activo. Abre la app en tu móvil o PC.');
+        } else {
+          setStatus('error');
+          setErrorMsg(e.message || 'Error');
+        }
+      }
+    })();
+    return () => stopPolling();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const startPolling = () => {
+    stopPolling();
+    const tick = async () => {
+      try {
+        const pb = await withToken(t => spApi.getPlaybackState(t));
+        setPlayback(pb);
+        if (pb) setStatus(pb.is_playing ? 'playing' : 'paused');
+      } catch (e) {
+        // Ignorar errores transitorios
+      }
+    };
+    tick();
+    pollRef.current = setInterval(tick, 5000);
+  };
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  };
+
+  const togglePlay = async () => {
+    try {
+      if (status === 'playing') {
+        await withToken(t => spApi.pause(t));
+        setStatus('paused');
+      } else {
+        await withToken(t => spApi.play(t));
+        setStatus('playing');
+      }
+    } catch (e) { setErrorMsg(e.message); }
+  };
+  const skipNext = async () => {
+    try { await withToken(t => spApi.next(t)); setTimeout(() => withToken(t => spApi.getPlaybackState(t)).then(setPlayback), 400); }
+    catch (e) { setErrorMsg(e.message); }
+  };
+  const skipPrev = async () => {
+    try { await withToken(t => spApi.previous(t)); setTimeout(() => withToken(t => spApi.getPlaybackState(t)).then(setPlayback), 400); }
+    catch (e) { setErrorMsg(e.message); }
+  };
+  const retryConnect = async () => {
+    startedRef.current = false;
+    // Re-ejecutar el efecto manual
+    setStatus('loading');
+    setErrorMsg('');
+    try {
+      const devs = await withToken(t => spApi.getDevices(t));
+      setDevices(devs.devices || []);
+      const active = devs.devices.find(d => d.is_active) || devs.devices[0];
+      if (!active) { setStatus('no-device'); setErrorMsg('Abre Spotify en algún dispositivo primero.'); return; }
+      await withToken(t => spApi.play(t, { deviceId: active.id, contextUri }));
+      setStatus('playing');
+      startPolling();
+    } catch (e) {
+      setStatus('error'); setErrorMsg(e.message);
+    }
+  };
+
+  const track = playback?.item;
+  const albumArt = track?.album?.images?.[0]?.url;
+  const trackName = track?.name || (status === 'loading' ? 'Conectando…' : status === 'no-device' ? 'Sin dispositivo activo' : 'Listo');
+  const artistName = track?.artists?.map(a => a.name).join(', ') || (devices[0] ? `Reproduciendo en ${devices.find(d => d.is_active)?.name || devices[0].name}` : '');
+
+  return (
+    <div
+      className="fixed left-3 right-3 max-w-xl mx-auto z-40 animate-slideUp"
+      style={{ bottom: 'calc(env(safe-area-inset-bottom) + 4.5rem)' }}
+      role="region"
+      aria-label="Reproductor Spotify"
+    >
+      <div className="bg-stone-900 border border-cta-500/40 rounded-2xl shadow-2xl overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-3 py-1.5 bg-stone-950 border-b border-stone-800">
+          <div className="flex items-center gap-2 text-[11px] text-stone-400 min-w-0">
+            <Music2 size={12} className={`flex-shrink-0 ${status === 'playing' ? 'text-cta-400 animate-pulse' : 'text-stone-500'}`} aria-hidden="true" />
+            <span className="font-bold tracking-wider truncate">
+              {status === 'playing' ? 'REPRODUCIENDO' : status === 'paused' ? 'PAUSADO' : status === 'loading' ? 'CARGANDO…' : status === 'no-device' ? 'SIN DISPOSITIVO' : 'ERROR'}
+            </span>
+          </div>
+          <div className="flex items-center gap-0.5 flex-shrink-0">
+            <button onClick={() => setMinimized(m => !m)} className="tap rounded-lg text-stone-500 hover:text-stone-300" style={{ minHeight: 32, minWidth: 32 }} aria-label={minimized ? 'Expandir' : 'Minimizar'}>
+              {minimized ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+            </button>
+            <button onClick={onClose} className="tap rounded-lg text-stone-500 hover:text-red-400" style={{ minHeight: 32, minWidth: 32 }} aria-label="Cerrar">
+              <X size={14} aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+
+        {!minimized && (
+          <div className="p-3">
+            {status === 'no-device' || status === 'error' ? (
+              <div className="py-3 text-center space-y-3">
+                <AlertTriangle size={20} className="text-yellow-400 mx-auto" aria-hidden="true" />
+                <div className="text-xs text-stone-300 px-2">{errorMsg}</div>
+                <div className="flex gap-2 justify-center">
+                  <button onClick={retryConnect} className="btn-primary px-4 py-2 rounded-xl text-white text-xs font-bold flex items-center gap-1.5">
+                    <RefreshCw size={12} aria-hidden="true" />REINTENTAR
+                  </button>
+                  {parsed && (
+                    <a href={toOpenUrl(parsed)} target="_blank" rel="noopener noreferrer" className="px-4 py-2 rounded-xl bg-stone-800 text-xs font-bold flex items-center gap-1.5 min-h-[44px]">
+                      <ExternalLink size={12} aria-hidden="true" />ABRIR SPOTIFY
+                    </a>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-3">
+                {albumArt ? (
+                  <img src={albumArt} alt="" className="w-14 h-14 rounded-lg flex-shrink-0" />
+                ) : (
+                  <div className="w-14 h-14 rounded-lg bg-stone-800 flex items-center justify-center flex-shrink-0">
+                    <Music2 size={20} className="text-stone-600" aria-hidden="true" />
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="font-bold text-sm truncate">{trackName}</div>
+                  <div className="text-[11px] text-stone-500 truncate">{artistName}</div>
+                </div>
+                <div className="flex items-center gap-0.5 flex-shrink-0">
+                  <button onClick={skipPrev} className="tap rounded-lg text-stone-300 hover:text-cta-400 hover:bg-stone-800" aria-label="Anterior">
+                    <SkipBack size={18} aria-hidden="true" />
+                  </button>
+                  <button onClick={togglePlay} className="tap rounded-full bg-cta-500 text-stone-950 hover:bg-cta-400" style={{ minHeight: 44, minWidth: 44 }} aria-label={status === 'playing' ? 'Pausar' : 'Reproducir'}>
+                    {status === 'playing' ? <Pause size={18} aria-hidden="true" fill="currentColor" /> : <Play size={18} aria-hidden="true" fill="currentColor" />}
+                  </button>
+                  <button onClick={skipNext} className="tap rounded-lg text-stone-300 hover:text-cta-400 hover:bg-stone-800" aria-label="Siguiente">
+                    <SkipForward size={18} aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────── AUTH ERROR TOAST ─────────────────────── */
+function AuthErrorToast({ message, onDismiss }) {
+  useEffect(() => {
+    const t = setTimeout(onDismiss, 7000);
+    return () => clearTimeout(t);
+  }, [onDismiss]);
+  return (
+    <div className="fixed top-4 left-4 right-4 max-w-md mx-auto z-50 animate-slideUp" role="alert">
+      <div className="bg-red-950 border border-red-500/50 rounded-2xl p-4 flex items-start gap-3 shadow-2xl">
+        <AlertTriangle size={18} className="text-red-400 flex-shrink-0 mt-0.5" aria-hidden="true" />
+        <div className="flex-1 text-xs text-red-100">{message}</div>
+        <button onClick={onDismiss} className="tap rounded-lg text-red-300 hover:text-white" aria-label="Cerrar" style={{ minWidth: 32, minHeight: 32 }}>
+          <X size={14} aria-hidden="true" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────── SPOTIFY PLAYER (embed, fallback) ─────────────────────── */
 
 function SpotifyPlayer({ playlistUrl, onClose }) {
   const parsed = parseSpotify(playlistUrl);
