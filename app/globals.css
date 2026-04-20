@@ -1,0 +1,242 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Sistema tipográfico — Barlow (fitness) */
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+    text-size-adjust: 100%;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    font-family: 'Barlow', system-ui, -apple-system, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    overscroll-behavior-y: none;
+    background: #0C0A09;
+    color: #F8FAFC;
+    touch-action: manipulation;
+  }
+  h1, h2, h3, h4 {
+    font-family: 'Barlow Condensed', 'Barlow', system-ui, sans-serif;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+  }
+  /* Focus visible global — accesibilidad */
+  :focus-visible {
+    outline: 2px solid #F97316;
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible {
+    outline: 2px solid #F97316;
+    outline-offset: 2px;
+  }
+  /* Inputs numéricos */
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type=number] { -moz-appearance: textfield; }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #292524; border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: #44403C; }
+
+/* Animaciones (150-300ms según UI/UX Pro Max, transform/opacity) */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes popIn {
+  0% { opacity: 0; transform: scale(0.6); }
+  60% { opacity: 1; transform: scale(1.1); }
+  100% { opacity: 1; transform: scale(1); }
+}
+@keyframes checkPop {
+  0% { transform: scale(0); }
+  50% { transform: scale(1.25); }
+  100% { transform: scale(1); }
+}
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 20px rgba(249, 115, 22, 0.35); }
+  50% { box-shadow: 0 0 40px rgba(249, 115, 22, 0.6); }
+}
+@keyframes pulseGlowCta {
+  0%, 100% { box-shadow: 0 0 20px rgba(34, 197, 94, 0.35); }
+  50% { box-shadow: 0 0 44px rgba(34, 197, 94, 0.65); }
+}
+@keyframes shimmer {
+  0% { background-position: -1000px 0; }
+  100% { background-position: 1000px 0; }
+}
+@keyframes ring {
+  0%, 100% { transform: rotate(0deg); }
+  10%, 30% { transform: rotate(-8deg); }
+  20%, 40% { transform: rotate(8deg); }
+  50% { transform: rotate(0deg); }
+}
+@keyframes gradientShift {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+@keyframes floatOrb {
+  0%, 100% { transform: translate(0, 0); }
+  33% { transform: translate(20px, -18px); }
+  66% { transform: translate(-16px, 12px); }
+}
+
+.animate-fadeIn { animation: fadeIn 0.25s ease-out both; }
+.animate-slideUp { animation: slideUp 0.3s ease-out both; }
+.animate-slideInRight { animation: slideInRight 0.25s ease-out both; }
+.animate-popIn { animation: popIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.animate-checkPop { animation: checkPop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.animate-pulseGlow { animation: pulseGlow 2.4s ease-in-out infinite; }
+.animate-pulseGlowCta { animation: pulseGlowCta 2.4s ease-in-out infinite; }
+.animate-ring { animation: ring 0.8s ease-in-out infinite; }
+.animate-floatOrb { animation: floatOrb 14s ease-in-out infinite; }
+
+/* Stagger helper — aplica a hijos con delays crecientes */
+.stagger > * { opacity: 0; animation: fadeIn 0.35s ease-out forwards; }
+.stagger > *:nth-child(1) { animation-delay: 0.04s; }
+.stagger > *:nth-child(2) { animation-delay: 0.08s; }
+.stagger > *:nth-child(3) { animation-delay: 0.12s; }
+.stagger > *:nth-child(4) { animation-delay: 0.16s; }
+.stagger > *:nth-child(5) { animation-delay: 0.20s; }
+.stagger > *:nth-child(6) { animation-delay: 0.24s; }
+.stagger > *:nth-child(7) { animation-delay: 0.28s; }
+.stagger > *:nth-child(8) { animation-delay: 0.32s; }
+.stagger > *:nth-child(9) { animation-delay: 0.36s; }
+.stagger > *:nth-child(n+10) { animation-delay: 0.40s; }
+
+/* Transición entre vistas */
+.view-enter { animation: fadeIn 0.25s ease-out both; }
+
+/* prefers-reduced-motion: respeta preferencias del usuario */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Gradient text — Barlow Condensed + duotono naranja→verde */
+.gradient-text {
+  background: linear-gradient(135deg, #F97316 0%, #FB923C 40%, #22C55E 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Headings utility — número marcador tipo deportivo */
+.stat-number {
+  font-family: 'Barlow Condensed', sans-serif;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+}
+
+.tracking-display {
+  letter-spacing: -0.04em;
+}
+
+/* Botón primario: naranja + hover color-shift (no scale según UX rule) */
+.btn-primary {
+  background: linear-gradient(135deg, #F97316 0%, #EA580C 100%);
+  transition: box-shadow 250ms ease, filter 200ms ease, transform 120ms ease;
+  min-height: 44px;
+}
+.btn-primary:hover { filter: brightness(1.08); box-shadow: 0 0 30px rgba(249, 115, 22, 0.45); }
+.btn-primary:active { transform: scale(0.97); filter: brightness(0.95); }
+
+.btn-cta {
+  background: linear-gradient(135deg, #22C55E 0%, #16A34A 100%);
+  transition: box-shadow 250ms ease, filter 200ms ease, transform 120ms ease;
+  min-height: 44px;
+}
+.btn-cta:hover { filter: brightness(1.08); box-shadow: 0 0 30px rgba(34, 197, 94, 0.45); }
+.btn-cta:active { transform: scale(0.97); filter: brightness(0.95); }
+
+/* Tarjeta interactiva con feedback en hover y press */
+.card-interactive {
+  cursor: pointer;
+  transition: border-color 200ms ease, background-color 200ms ease, box-shadow 200ms ease, transform 120ms ease;
+}
+.card-interactive:hover {
+  border-color: #57534E;
+  background-color: rgba(28, 25, 23, 0.8);
+}
+.card-interactive:active { transform: scale(0.985); }
+
+/* Icon button con press feedback */
+.tap {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 180ms ease, color 180ms ease, transform 100ms ease;
+}
+.tap:active { transform: scale(0.92); }
+
+/* Orbes animados de fondo (hero) */
+.bg-orbs {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.bg-orbs::before,
+.bg-orbs::after {
+  content: '';
+  position: absolute;
+  width: 50%;
+  height: 60%;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.35;
+}
+.bg-orbs::before {
+  background: radial-gradient(circle, #F97316 0%, transparent 70%);
+  top: -10%;
+  left: -10%;
+  animation: floatOrb 16s ease-in-out infinite;
+}
+.bg-orbs::after {
+  background: radial-gradient(circle, #22C55E 0%, transparent 70%);
+  bottom: -20%;
+  right: -10%;
+  animation: floatOrb 20s ease-in-out infinite reverse;
+}
+
+/* Progress bar con transición suave */
+.progress-fill {
+  transition: width 600ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Nombres con tracking natural (no condensado agresivo) */
+.name-heading {
+  font-family: 'Barlow Condensed', 'Barlow', system-ui, sans-serif;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  text-transform: none;
+}
